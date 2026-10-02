@@ -1,0 +1,25 @@
+# 工作区数据（含体检记录、隐私信息，不入库）
+.workbuddy/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller 中间产物
+build/
+*.spec
+
+# 运行时生成
+sitecheck.version
+检测结果-*.md
+
+# 本地工具输出（含本机 hosts 域名清单、DNS 实测数据，属隐私，默认不入库）
+hosts-audit.json
+dns-bench.json
+hosts-体检报告.md
+hosts-体检报告-第二轮.md
+hosts-体检报告-第三轮.md
+greasyfork-检测报告.md
+检测结果-greasyfork.md
+检测结果-github.com.md
