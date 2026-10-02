@@ -2,6 +2,12 @@
 
 网站直连检测工具。输入一个域名，逐层定位"为什么打不开"，并只在 hosts 真的能解决时才建议你改 hosts。
 
+## 下载
+
+[**v1.0 · Windows x64（zip，37 MB）**](https://github.com/45944831/sitecheck/releases/download/v1.0/sitecheck-v1.0-windows-x64.zip)
+
+解压后整个文件夹一起保留（`sitecheck.exe` 依赖同目录的 `_internal`），双击即可运行，无需 Python 环境。
+
 ## 它能回答什么
 
 1. **这个站的真实 IP 是多少** —— 判定依据是 TLS 证书 SAN 匹配，不是 DNS 说什么。DNS 被污染成别家 IP 时，它会如实报"未能确认"，不会把伪造 IP 当真的给你。
