@@ -90,7 +90,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QL
 
 UI_FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
-APP_VERSION = sitecheck.VERSION   # launch() 时会用 next_version() 刷新
+APP_VERSION = sitecheck.VERSION   # 固定版本号，来自 sitecheck.VERSION
 
 CSS_OK = "background:#1d9e75;color:white;border-radius:4px;padding:9px;"
 CSS_BAD = "background:#c0392b;color:white;border-radius:4px;padding:9px;"
@@ -449,8 +449,6 @@ class Win(QWidget):
 
 
 def launch():
-    global APP_VERSION
-    APP_VERSION = sitecheck.next_version()   # 每次启动 +0.1，逢 10 进 1
     # windowed 子系统打包时不会创建控制台，双击启动也就没有黑框
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)

@@ -423,62 +423,7 @@ def build_tips(R, p):
 
 
 # ---------- 写入 hosts（需要管理员权限） ----------
-VERSION = "1.0"
-
-
-def _version_path():
-    """版本文件位置：优先放程序旁边，写不了再退回 %LOCALAPPDATA%"""
-    if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-    p = os.path.join(base, "sitecheck.version")
-    try:
-        with open(p, "a", encoding="utf-8"):
-            pass
-        return p
-    except Exception:
-        fb = os.path.join(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()), "sitecheck")
-        try:
-            os.makedirs(fb, exist_ok=True)
-        except Exception:
-            pass
-        return os.path.join(fb, "sitecheck.version")
-
-
-def next_version():
-    """
-    读取并递增版本号：每次启动 +0.1，逢 10 进 1（1.9 -> 2.0）。
-    用整数存 major/minor，不走浮点，避免 0.1 累加出 1.9000000000000001 这种东西。
-    """
-    global VERSION
-    p = _version_path()
-    major, minor, found = 1, 0, False
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            txt = f.read().strip()
-        if txt:
-            parts = txt.split(".")
-            major = int(parts[0])
-            minor = int(parts[1]) if len(parts) > 1 else 0
-            found = True
-    except Exception:
-        pass
-
-    if found:                       # 首次运行保持 1.0，之后每次启动才 +0.1
-        minor += 1
-        if minor >= 10:             # 逢 10 进 1
-            major += 1
-            minor = 0
-
-    v = "%d.%d" % (major, minor)
-    try:
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(v)
-    except Exception:
-        pass
-    VERSION = v
-    return v
+VERSION = "1.0"   # 固定版本号：发版（重新打包）时手动改这里，不随启动次数变化
 
 
 def _mapping_matches(line, domain):
@@ -715,8 +660,6 @@ def main():
             stream.reconfigure(errors="replace")
         except Exception:
             pass
-
-    ver = next_version()   # 每次启动递增一次
 
     ap = argparse.ArgumentParser(description="网站直连检测工具")
     ap.add_argument("domain", nargs="?", help="域名，如 example.com；留空则进入交互模式")
