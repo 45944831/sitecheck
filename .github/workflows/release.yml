@@ -45,8 +45,27 @@ jobs:
           # 解压后结构与本地 dist 一致（使用说明里要求整个文件夹一起拷贝）。
           Compress-Archive -Path dist\sitecheck -DestinationPath "sitecheck-$tag-windows-x64.zip"
 
+      - name: 提取本版本更新说明
+        shell: pwsh
+        run: |
+          # 从 CHANGELOG.md 里抽出当前 tag 对应的那一节作为 Release 正文。
+          # 抽不到就退回整份 CHANGELOG —— 宁可正文长一点，也不要让发布卡住。
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag.TrimStart('v')
+          $all = Get-Content CHANGELOG.md -Raw -Encoding utf8
+          $pat = "(?ms)^##\s+\[?v?" + [regex]::Escape($ver) + "\]?[^\r\n]*\r?\n.*?(?=^##\s|\z)"
+          $m = [regex]::Match($all, $pat)
+          if ($m.Success) {
+            Write-Host "命中版本小节：$ver"
+            $m.Value | Set-Content release-notes.md -Encoding utf8
+          } else {
+            Write-Host "未找到 $ver 小节，回退为整份 CHANGELOG"
+            $all | Set-Content release-notes.md -Encoding utf8
+          }
+
       - name: 发布
         uses: softprops/action-gh-release@v2
         with:
           files: sitecheck-*-windows-x64.zip
+          body_path: release-notes.md
           generate_release_notes: true
