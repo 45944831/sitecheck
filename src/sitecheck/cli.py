@@ -116,7 +116,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(style.bold("\n检测 %s ..." % domain))
 
     report = orchestrator.analyze(domain, args.ip, progress,
-                                  timeout=args.timeout, version=__version__)
+                                  timeout=args.timeout, version=__version__,
+                                  total_timeout=args.deadline)
     if not args.quiet:
         print()
 
@@ -341,7 +342,10 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--apply-hosts", action="store_true",
                        help="把确认可用的真实 IP 写入 hosts 并刷新缓存（需管理员）")
     check.add_argument("--timeout", type=float, default=8.0,
-                       help="单次探测超时秒数（默认 8）")
+                       help="单层探测超时秒数（默认 8）")
+    check.add_argument("--deadline", type=float,
+                       default=orchestrator.DEFAULT_TOTAL_TIMEOUT,
+                       help="整体超时秒数（默认 45，0 表示不限）")
     check.add_argument("--quiet", action="store_true", help="不输出进度信息")
     check.set_defaults(func=cmd_check)
 

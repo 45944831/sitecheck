@@ -11,7 +11,15 @@ import json
 from enum import Enum
 from typing import Any
 
-from .models import HttpStatus, Layer, ProbeResult, Report, TcpStatus, TlsStatus
+from .models import (
+    HttpStatus,
+    Layer,
+    ProbeResult,
+    ProxyKind,
+    Report,
+    TcpStatus,
+    TlsStatus,
+)
 
 _LAYER_LABEL = {
     Layer.SUCCESS: "可直连",
@@ -86,6 +94,15 @@ def _match_text(probe: ProbeResult) -> str:
     return "是" if probe.tls.cert_match else "否"
 
 
+def _proxy_text(report: Report) -> str:
+    if not report.proxy.present:
+        return "未检测到"
+    text = "%s（%s）" % (report.proxy.url, report.proxy.source)
+    if report.proxy.kind is ProxyKind.PAC:
+        text += "　— PAC 脚本仅展示，不参与探测"
+    return text
+
+
 # ---------------------------------------------------------------- Markdown
 
 def render_markdown(report: Report) -> str:
@@ -126,12 +143,9 @@ def render_markdown(report: Report) -> str:
     # ---- 本机环境
     add("## 本机环境")
     add("")
-    if report.proxy.present:
-        add("- **代理**：%s（来源：%s）" % (report.proxy.url, report.proxy.source))
-        if verdict and verdict.proxy_note:
-            add("  - %s" % verdict.proxy_note)
-    else:
-        add("- **代理**：未检测到")
+    add("- **代理**：%s" % _proxy_text(report))
+    if report.proxy.present and verdict and verdict.proxy_note:
+        add("  - %s" % verdict.proxy_note)
     if report.sys_ips:
         add("- **系统解析结果**（含 hosts 影响）：%s" % _fmt_ips(report.sys_ips))
     else:
@@ -313,8 +327,7 @@ def render_html(report: Report) -> str:
     add("<table cellspacing='0' cellpadding='5' width='100%' "
         "style='border-collapse:collapse;font-size:9pt;'>")
     env_rows = [
-        ("代理", ("%s（%s）" % (report.proxy.url, report.proxy.source))
-         if report.proxy.present else "未检测到"),
+        ("代理", _proxy_text(report)),
         ("系统解析", _fmt_ips(report.sys_ips)),
         ("hosts 条目", ("第 %s 行" % "、".join(str(n) for n, _ in report.hosts))
          if report.hosts else "无该域名条目"),

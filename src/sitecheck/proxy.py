@@ -109,19 +109,6 @@ def detect() -> ProxyInfo:
     return ProxyInfo(kind=ProxyKind.NONE)
 
 
-def detect_all() -> list[ProxyInfo]:
-    """返回所有检测到的代理来源（用于报告里完整展示）。"""
-    found: list[ProxyInfo] = []
-    for probe in (_read_wininet, _read_env):
-        try:
-            info = probe()
-        except Exception:
-            info = None
-        if info and info.present:
-            found.append(info)
-    return found
-
-
 def _match_pattern(host: str, pattern: str) -> bool:
     pattern = pattern.strip().lower()
     if not pattern:

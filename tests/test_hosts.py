@@ -156,12 +156,26 @@ def test_restore_missing_backup(tmp_path):
         H.restore(tmp_path / "nope.bak", tmp_path / "hosts")
 
 
+def test_backup_names_unique_under_burst(hosts_file):
+    """同一毫秒内连续备份不得撞名 —— 撞名会互相覆盖并让还原拿到错误内容。"""
+    made = [H.backup(hosts_file) for _ in range(8)]
+    assert len({p.name for p in made}) == len(made)
+
+
+def test_restore_survives_fast_apply_restore(hosts_file):
+    """apply 后立刻 restore：安全备份不能覆盖目标备份，也不能被裁剪掉。"""
+    before = hosts_file.read_text(encoding="utf-8")
+    _msg, backup = H.apply("example.com", ["8.8.8.8"], hosts_file)
+    H.restore(backup, hosts_file)
+    assert hosts_file.read_text(encoding="utf-8") == before
+
+
 def test_list_backups_sorted_newest_first(hosts_file):
     H.apply("example.com", ["8.8.8.8"], hosts_file)
     H.apply("example.com", ["9.9.9.9"], hosts_file)
     backups = H.list_backups()
     assert len(backups) >= 2
-    assert backups[0].stat().st_mtime >= backups[-1].stat().st_mtime
+    assert backups[0].name >= backups[-1].name
 
 
 def test_backup_pruning(hosts_file):

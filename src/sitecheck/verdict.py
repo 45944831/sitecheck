@@ -80,6 +80,21 @@ def dns_consistency(report: Report) -> dict:
     }
 
 
+def _direct_failure_text(probe: ProbeResult) -> str:
+    """一句话说明直连卡在哪一层，用于代理对照的结论依据。"""
+    if probe.http and probe.http.detail:
+        return probe.http.detail
+    if probe.tls and (probe.tls.detail or probe.tls.status is not TlsStatus.OK):
+        return probe.tls.detail or ("TLS %s" % probe.tls.status.value)
+    names = {
+        TcpStatus.TIMEOUT: "TCP 超时",
+        TcpStatus.REFUSED: "TCP 连接被拒绝",
+        TcpStatus.RESET: "TCP 连接被重置",
+        TcpStatus.UNREACHABLE: "TCP 不可达",
+    }
+    return names.get(probe.tcp, "TCP %s" % probe.tcp.value)
+
+
 def _best_probe(probes: list[ProbeResult]) -> Optional[ProbeResult]:
     """挑一个最适合作为结论依据的 IP：优先有 HTTP 结果的、TCP 快的。"""
     if not probes:
@@ -103,9 +118,15 @@ def judge(report: Report) -> Verdict:
     hosts_ips = report.hosts_ips
     genuine = report.genuine_probes
     domain = report.domain
+    # 经代理拿到合法 HTTP 应答，说明浏览器按代理路径能访问
+    proxy_ok = [p for p in report.probes
+                if p.http_proxy and p.http_proxy.status in
+                (HttpStatus.OK, HttpStatus.REJECT)]
 
     # ---- 0. 环境可信度优先：控制组全不通时，其余结论一律作废
-    if report.control_all_failed:
+    # 例外：代理路径已经取到真实响应，此时"本机出网"并非不可信，
+    # 而是"直连路径不可信"，应落到下面的 PROXY_REQUIRED。
+    if report.control_all_failed and not proxy_ok:
         failed = "、".join("%s(%s)" % (c.host, c.ip) for c in report.control)
         return Verdict(
             layer=Layer.INCONCLUSIVE,
@@ -156,19 +177,18 @@ def judge(report: Report) -> Verdict:
             hosts_advice="无需修改 hosts：问题在服务端内容策略，与 DNS 和 hosts 无关。",
         )
 
-    # ---- 3. 直连无响应，但经代理能通
-    proxy_ok = [p for p in genuine
-                if p.http_proxy and p.http_proxy.status is HttpStatus.OK]
+    # ---- 3. 直连不通，但经代理能通
     if proxy_ok:
-        best = _best_probe(proxy_ok)
-        assert best is not None and best.http_proxy is not None
+        best = min(proxy_ok, key=lambda p: p.http_proxy.total_ms if p.http_proxy else 0.0)
+        assert best.http_proxy is not None
         return Verdict(
             layer=Layer.PROXY_REQUIRED,
             headline="直连不通，但经代理可以访问（HTTP %s）" % best.http_proxy.code_str,
-            evidence=("对 %s 的直连 HTTP 请求没有收到任何响应，而经 %s 访问返回 HTTP %s。"
+            evidence=("对 %s 的直连探测失败（%s），而经 %s 访问返回 HTTP %s。"
                       "说明问题出在本机到该站之间的直连路径上，而不是站点本身。"
                       "你的浏览器走代理，所以浏览器里应该是正常的。"
-                      % (best.ip, report.proxy.url, best.http_proxy.code_str)),
+                      % (best.ip, _direct_failure_text(best), report.proxy.url,
+                         best.http_proxy.code_str)),
             hosts_advice=("不要改 hosts：改 hosts 只影响 DNS 解析，无法绕过直连路径上的阻断。"
                           "本机已配置代理（%s），保持浏览器走代理即可。" % report.proxy.url),
             proxy_note="直连与代理路径结果不同，浏览器走代理时不受影响。",
@@ -193,6 +213,16 @@ def judge(report: Report) -> Verdict:
                       "%s" % (best.ip, detail, proxy_hint)),
             hosts_advice=("不要改 hosts：DNS 解析和证书都已确认正确。"
                           "建议检查本机代理 / 防火墙设置，或用浏览器实测确认。"),
+        )
+
+    # ---- 4.5 探测被取消 / 整体超时：证据不完整，不做负面推断
+    if report.incomplete:
+        return Verdict(
+            layer=Layer.INCONCLUSIVE,
+            headline="检测未完成：%s" % report.incomplete,
+            evidence=("已完成的探测不足以形成结论。未跑完的阶段不做推断，"
+                      "避免把「没测到」当成「不通」。"),
+            hosts_advice="不建议此时修改 hosts：证据不完整，请重新检测。",
         )
 
     # ---- 5. TCP + TLS 都通，但证书不匹配 -> 污染
@@ -350,9 +380,11 @@ def build_tips(report: Report, best: Optional[ProbeResult]) -> list[str]:
     tls = best.tls
     if tls:
         if tls.alpn == "h2":
-            tips.append("服务端支持 HTTP/2（ALPN 协商成功），协议层无需优化")
+            tips.append("服务端支持 HTTP/2（ALPN 协商成功）；"
+                        "本次 HTTP 探测按 HTTP/1.1 发起")
         elif tls.alpn:
-            tips.append("当前协商协议 %s，服务端未提供 HTTP/2" % tls.alpn)
+            tips.append("当前协商协议 %s（本次 HTTP 探测按 HTTP/1.1 发起），"
+                        "服务端未提供 HTTP/2" % tls.alpn)
 
         if tls.version == "TLSv1.3":
             tips.append("TLS 1.3 已启用，握手开销最低")

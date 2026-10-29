@@ -38,8 +38,42 @@ EXCLUDE = [
     "PyQt5.QtBluetooth", "PyQt5.QtNfc", "PyQt5.QtPositioning",
     "PyQt5.QtSerialPort", "PyQt5.QtSql", "PyQt5.QtTest",
     "PyQt5.QtDesigner", "PyQt5.QtHelp", "PyQt5.QtSvg",
+    "PyQt5.QtNetwork", "PyQt5.QtDBus", "PyQt5.QtWebSockets",
     "tkinter",
 ]
+
+# PyInstaller 的 PyQt5 hook 会把 Qt5/bin 里的 Quick / Qml / 软件 OpenGL 整套复制，
+# 即使 --exclude-module 排除了对应绑定。纯 QWidget + 栅格绘制用不到这些，
+# 打包后统一剔掉：安装体积 92MB -> 约 50MB，zip 38MB -> 约 20MB。
+PRUNE_QT_BIN = [
+    "opengl32sw.dll",        # 软件 OpenGL，仅 QtQuick / QOpenGLWidget 需要
+    "d3dcompiler_47.dll",    # ANGLE 的着色器编译器
+    "libEGL.dll",
+    "libGLESv2.dll",
+    "Qt5Quick.dll",
+    "Qt5Qml.dll",
+    "Qt5QmlModels.dll",
+    "Qt5DBus.dll",
+    "Qt5Network.dll",
+    "Qt5WebSockets.dll",
+    "Qt5Svg.dll",
+]
+PRUNE_QT_PLUGINS = [
+    "platforms/qminimal.dll",       # 仅离屏 / 无窗口测试用
+    "platforms/qoffscreen.dll",
+    "platforms/qwebgl.dll",
+    "platformthemes/qxdgdesktopportal.dll",   # Linux 桌面门户
+    "generic/qtuiotouchplugin.dll",
+    "imageformats/qsvg.dll",
+    "iconengines/qsvgicon.dll",
+    "imageformats/qwebp.dll",
+    "imageformats/qtiff.dll",
+    "imageformats/qtga.dll",
+    "imageformats/qwbmp.dll",
+    "imageformats/qicns.dll",
+]
+# 应用从未安装 QTranslator，Qt 自带的 .qm 一律用不到
+PRUNE_QT_DIRS = ["translations"]
 
 
 def find_pyinstaller() -> list[str] | None:
@@ -110,7 +144,23 @@ def prepare_dist(target: str) -> None:
         print("       [警告] 旧产物无法移走（%s），将交由 PyInstaller 处理" % exc)
 
 
+def _configure_stdio() -> None:
+    """管道 / CI 里 stdout 可能是 cp1252，中文 print 会直接抛 UnicodeEncodeError。
+
+    统一改成 UTF-8；个别字符编不出来时替换而不是中断构建。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def main() -> int:
+    _configure_stdio()
     mode = "onefile" if len(sys.argv) > 1 and sys.argv[1].lower() == "onefile" else "onedir"
 
     pyinstaller = find_pyinstaller()
@@ -146,7 +196,8 @@ def main() -> int:
     cmd.append(ENTRY)
 
     prepare_dist(os.path.join(ROOT, "dist", "sitecheck"))
-    rc = subprocess.call(cmd, cwd=ROOT)
+    child_env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    rc = subprocess.call(cmd, cwd=ROOT, env=child_env)
     if rc != 0:
         print()
         print("[失败] 打包出错，返回码 %d" % rc)
@@ -154,7 +205,9 @@ def main() -> int:
 
     print()
     if mode == "onedir":
-        _copy_docs(os.path.join(ROOT, "dist", "sitecheck"))
+        target = os.path.join(ROOT, "dist", "sitecheck")
+        _prune_payload(target)
+        _copy_docs(target)
         print("[完成] 输出在 dist\\sitecheck\\ 目录")
         print("       运行：dist\\sitecheck\\sitecheck.exe")
         print("       分发：整个 dist\\sitecheck 文件夹一起拷贝，可压成 zip")
@@ -162,6 +215,53 @@ def main() -> int:
         _copy_docs(os.path.join(ROOT, "dist"))
         print("[完成] 输出在 dist\\sitecheck.exe")
     return 0
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def _prune_payload(target_dir: str) -> None:
+    """剔除 PyInstaller 多带的 Qt 组件。
+
+    个别文件被安全软件占用时只提示、不中断构建 —— 这里的目标是瘦身，
+    不是必须成功的步骤。
+    """
+    qt_dir = os.path.join(target_dir, "_internal", "PyQt5", "Qt5")
+    if not os.path.isdir(qt_dir):
+        return
+
+    before = _dir_size(target_dir)
+    targets = [os.path.join(qt_dir, "bin", name) for name in PRUNE_QT_BIN]
+    targets += [os.path.join(qt_dir, "plugins", name)
+                for name in PRUNE_QT_PLUGINS]
+    for path in targets:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print("       [提示] 无法删除 %s（%s）"
+                  % (os.path.relpath(path, target_dir), exc))
+    for name in PRUNE_QT_DIRS:
+        path = os.path.join(qt_dir, name)
+        if os.path.isdir(path):
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                print("       [提示] 无法删除 %s（%s）" % (name, exc))
+
+    after = _dir_size(target_dir)
+    print("       已精简未使用的 Qt 组件：%.1f MB -> %.1f MB（-%.1f MB）"
+          % (before / 1048576, after / 1048576,
+             (before - after) / 1048576))
 
 
 def _copy_docs(target_dir: str) -> None:

@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -137,22 +138,45 @@ def validate_ips(ips: list[str]) -> list[str]:
 
 # ---------------------------------------------------------------- 备份
 
-def backup(path: Path = HOSTS_PATH) -> Path:
-    """备份到独立目录，并清理过旧的备份。"""
+def _new_backup_path(target_dir: Path) -> Path:
+    """生成不冲突的备份文件名。
+
+    v2.0.0 只用毫秒时间戳命名，连续备份会撞名并互相覆盖；CI 上的
+    备份/还原测试就是因为这个时序问题偶发失败。
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    candidate = target_dir / ("hosts-%s.bak" % stamp)
+    seq = 1
+    while candidate.exists():
+        candidate = target_dir / ("hosts-%s-%d.bak" % (stamp, seq))
+        seq += 1
+    return candidate
+
+
+def backup(path: Path = HOSTS_PATH, keep: Iterable[Path] = ()) -> Path:
+    """备份到独立目录，并清理过旧的备份。
+
+    keep 里的文件不会被裁剪 —— 还原流程用它在清理时保住目标备份。
+    用 copyfile 而不是 copy2：备份的 mtime 应当反映备份创建时间，
+    否则按时间排序时多份备份会因源文件未变而拿到相同 mtime。
+    """
     target_dir = backup_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
-    dst = target_dir / ("hosts-%s.bak" % stamp)
-    shutil.copy2(path, dst)
-    _prune_backups(target_dir)
+    dst = _new_backup_path(target_dir)
+    shutil.copyfile(path, dst)
+    _prune_backups(target_dir, keep)
     return dst
 
 
-def _prune_backups(target_dir: Path) -> None:
+def _prune_backups(target_dir: Path, keep: Iterable[Path] = ()) -> None:
     try:
+        # 文件名里的时间戳定宽，按名字倒序即"新 → 旧"
         files = sorted(target_dir.glob("hosts-*.bak"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
+                       key=lambda p: p.name, reverse=True)
+        protected = {p.resolve() for p in keep}
         for old in files[MAX_BACKUPS:]:
+            if old.resolve() in protected:
+                continue
             old.unlink(missing_ok=True)
     except OSError:
         pass
@@ -163,7 +187,7 @@ def list_backups() -> list[Path]:
     if not target_dir.exists():
         return []
     return sorted(target_dir.glob("hosts-*.bak"),
-                  key=lambda p: p.stat().st_mtime, reverse=True)
+                  key=lambda p: p.name, reverse=True)
 
 
 def restore(backup_path: Path, path: Path = HOSTS_PATH) -> str:
@@ -171,7 +195,7 @@ def restore(backup_path: Path, path: Path = HOSTS_PATH) -> str:
     if not backup_path.exists():
         raise HostsError("备份文件不存在：%s" % backup_path)
     try:
-        safety = backup(path)
+        safety = backup(path, keep=[backup_path])
     except OSError as exc:
         raise HostsError("还原前备份失败，已中止：%s" % exc) from exc
     try:

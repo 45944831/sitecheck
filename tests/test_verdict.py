@@ -73,6 +73,53 @@ def test_proxy_required_when_direct_fails_but_proxy_works():
     assert "不要改 hosts" in verdict.hosts_advice
 
 
+def test_proxy_required_when_direct_tcp_blocked():
+    """直连连 TCP 都不通、代理能访问时，同样要判 PROXY_REQUIRED。
+
+    这是"必须走代理"环境里最常见的形态；只要求 genuine 的旧逻辑在这里
+    会落到 TCP_BLOCKED，与浏览器实际体验相反。
+    """
+    rep = report(
+        proxy=proxy("http://127.0.0.1:7890"),
+        probes=[probe("1.2.3.4", tcp=TcpStatus.TIMEOUT,
+                      http_proxy=http_ok(200))],
+    )
+    verdict = judge(rep)
+    assert verdict.layer is Layer.PROXY_REQUIRED
+    assert "TCP 超时" in verdict.evidence
+
+
+def test_proxy_required_beats_control_veto():
+    """代理路径已取到响应时，控制组全灭不应否决代理结论。"""
+    rep = report(
+        proxy=proxy("http://127.0.0.1:7890"),
+        control=[control(False, "www.baidu.com", "1.1.1.1")],
+        probes=[probe("1.2.3.4", tcp=TcpStatus.TIMEOUT,
+                      http_proxy=http_ok(200))],
+    )
+    assert judge(rep).layer is Layer.PROXY_REQUIRED
+
+
+def test_proxy_reject_still_counts_as_reachable():
+    """经代理拿到 4xx，链路是通的，仍应判 PROXY_REQUIRED 而不是 TCP 不通。"""
+    rep = report(
+        proxy=proxy("http://127.0.0.1:7890"),
+        probes=[probe("1.2.3.4", tcp=TcpStatus.TIMEOUT,
+                      http_proxy=http_reject(403))],
+    )
+    assert judge(rep).layer is Layer.PROXY_REQUIRED
+
+
+def test_incomplete_probe_never_becomes_negative_conclusion():
+    """取消 / 超时导致探测不完整时，不能把"没测到"当成"不通"。"""
+    rep = report(probes=[probe("1.2.3.4", tcp=TcpStatus.TIMEOUT)],
+                 incomplete="整体超时")
+    verdict = judge(rep)
+    assert verdict.layer is Layer.INCONCLUSIVE
+    assert "未完成" in verdict.headline
+    assert "hosts" in verdict.hosts_advice
+
+
 # ---------------------------------------------------------------- 成功分支
 
 def test_success_via_dns():

@@ -30,9 +30,9 @@ try:                                            # 正常安装时从包元数据
     try:
         __version__ = _pkg_version("sitecheck")
     except PackageNotFoundError:
-        __version__ = "2.0.0"
+        __version__ = "2.0.1"
 except ImportError:                             # pragma: no cover
-    __version__ = "2.0.0"
+    __version__ = "2.0.1"
 
 from .models import Layer, Report, Verdict  # noqa: E402
 from .orchestrator import analyze, normalize_domain  # noqa: E402

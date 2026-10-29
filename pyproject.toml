@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sitecheck"
-version = "2.0.0"
+version = "2.0.1"
 description = "网站直连检测工具：逐层定位为什么打不开，只在 hosts 真能解决时才建议改 hosts"
 readme = "README.md"
 requires-python = ">=3.10"

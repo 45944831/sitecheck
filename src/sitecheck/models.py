@@ -233,6 +233,8 @@ class Report:
     tips: list[str] = field(default_factory=list)
     verdict: Optional[Verdict] = None
     extra_ips: list[str] = field(default_factory=list)
+    # 非空表示探测被取消或整体超时（值即原因），结论只能是不完整
+    incomplete: str = ""
 
     @property
     def genuine_probes(self) -> list[ProbeResult]:

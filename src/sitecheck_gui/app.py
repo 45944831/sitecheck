@@ -46,7 +46,7 @@ import sitecheck
 from sitecheck import hosts as hostsmod
 from sitecheck import render as rendermod
 from sitecheck.models import HttpStatus, Layer
-from sitecheck.orchestrator import normalize_domain
+from sitecheck.orchestrator import DEFAULT_TOTAL_TIMEOUT, normalize_domain
 
 UI_FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
@@ -93,18 +93,26 @@ class AnalyzeWorker(QThread):
     done = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, domain: str, ips: list[str], timeout: float, parent=None):
+    def __init__(self, domain: str, ips: list[str], timeout: float,
+                 total_timeout: float = DEFAULT_TOTAL_TIMEOUT, parent=None):
         super().__init__(parent)
         self.domain = domain
         self.ips = ips
         self.timeout = timeout
+        self.total_timeout = total_timeout
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
 
     def run(self) -> None:
         try:
             report = sitecheck.analyze(self.domain, self.ips,
                                        progress=self.progress.emit,
                                        timeout=self.timeout,
-                                       version=APP_VERSION)
+                                       version=APP_VERSION,
+                                       total_timeout=self.total_timeout,
+                                       should_stop=lambda: self._stop)
             self.done.emit(report)
         except Exception as exc:                       # noqa: BLE001
             self.failed.emit("%s\n\n%s" % (exc, traceback.format_exc(limit=5)))
@@ -134,7 +142,8 @@ class BatchWorker(QThread):
             started = time.perf_counter()
             try:
                 report = sitecheck.analyze(domain, [], timeout=self.timeout,
-                                           version=APP_VERSION)
+                                           version=APP_VERSION,
+                                           should_stop=lambda: self._stop)
             except Exception as exc:                   # noqa: BLE001
                 self.item_done.emit(("error", domain, str(exc)[:80], 0.0))
                 continue
@@ -231,6 +240,12 @@ class MainWindow(QWidget):
                                  "padding:8px 18px;border-radius:4px;")
         self.b_run.clicked.connect(self.start)
 
+        self.b_cancel = QPushButton("取消")
+        self.b_cancel.setCursor(Qt.PointingHandCursor)
+        self.b_cancel.setEnabled(False)
+        self.b_cancel.setToolTip("中断当前检测；已完成的层保留，未探测的部分只给「无法判定」")
+        self.b_cancel.clicked.connect(self.cancel)
+
         self.b_hosts = QPushButton("写入 hosts")
         self.b_hosts.setCursor(Qt.PointingHandCursor)
         self.b_hosts.setEnabled(False)
@@ -246,7 +261,8 @@ class MainWindow(QWidget):
         self.b_clear.setCursor(Qt.PointingHandCursor)
         self.b_clear.clicked.connect(self.clear)
 
-        for button in (self.b_run, self.b_hosts, self.b_export, self.b_clear):
+        for button in (self.b_run, self.b_cancel, self.b_hosts,
+                       self.b_export, self.b_clear):
             button.setMinimumHeight(34)
             button.setFont(QFont(UI_FONT, 10))
             buttons.addWidget(button)
@@ -441,6 +457,7 @@ class MainWindow(QWidget):
         self.report = None
         self.b_run.setEnabled(False)
         self.b_run.setText("检测中...")
+        self.b_cancel.setEnabled(True)
         self.b_add.setEnabled(False)
         self.b_hosts.setEnabled(False)
         self.b_export.setEnabled(False)
@@ -468,11 +485,23 @@ class MainWindow(QWidget):
         if total > 0:
             self.pbar.setValue(int(done * 100 / total))
 
+    def cancel(self) -> None:
+        if not (self.worker and self.worker.isRunning()):
+            return
+        self.worker.stop()
+        self.b_cancel.setEnabled(False)
+        self.banner.setText("正在中断 ...")
+        self.banner.setStyleSheet(CSS_BUSY)
+        self.status.setText("已请求中断，当前阶段结束后停止")
+        self.log.appendPlainText("[取消] 已请求中断，当前阶段结束后停止")
+
     def on_done(self, report) -> None:
         self.report = report
         self.b_run.setEnabled(True)
         self.b_run.setText("开始检测")
-        self.pbar.setValue(100)
+        self.b_cancel.setEnabled(False)
+        if not report.incomplete:
+            self.pbar.setValue(100)
 
         if report.real_ips:
             self.ip_label.setText("真实 IP：%s　（已通过 TLS 证书校验）"
@@ -498,12 +527,22 @@ class MainWindow(QWidget):
         self.result_view.setHtml(rendermod.render_html(report))
         self.result_view.verticalScrollBar().setValue(0)
         self.log.appendPlainText("")
-        self.log.appendPlainText("检测完成。判定：%s" % (verdict.headline if verdict else "-"))
-        self.status.setText("检测完成　|　%d 个候选 IP　|　耗时见日志" % len(report.probes))
+        if report.incomplete:
+            self.log.appendPlainText(
+                "检测中断：%s（只探测了 %d 个 IP，未探测部分不参与判定）"
+                % (report.incomplete, len(report.probes)))
+            self.status.setText("已中断（%s）　|　结论不可作为「连不上」的依据"
+                                % report.incomplete)
+        else:
+            self.log.appendPlainText("检测完成。判定：%s"
+                                     % (verdict.headline if verdict else "-"))
+            self.status.setText("检测完成　|　%d 个候选 IP　|　耗时见日志"
+                                % len(report.probes))
 
     def on_error(self, message: str) -> None:
         self.b_run.setEnabled(True)
         self.b_run.setText("开始检测")
+        self.b_cancel.setEnabled(False)
         self.pbar.setValue(0)
         self.banner.setText("检测出错")
         self.banner.setStyleSheet(CSS_BAD)
@@ -689,7 +728,8 @@ class MainWindow(QWidget):
                 color = {Layer.SUCCESS: "#1d9e75",
                          Layer.HTTP_REJECT: "#b26a00",
                          Layer.HTTP_NO_RESPONSE: "#b26a00",
-                         Layer.PROXY_REQUIRED: "#6b4fa8"}.get(layer, "#c0392b")
+                         Layer.PROXY_REQUIRED: "#6b4fa8",
+                         Layer.INCONCLUSIVE: "#6b4fa8"}.get(layer, "#c0392b")
                 item.setForeground(QColor(color))
             self.table.setItem(row, column, item)
 
