@@ -3,23 +3,35 @@
 
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
 
-# PyInstaller 中间产物
+# 测试与工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# PyInstaller 中间产物与打包结果
 build/
+dist/
 *.spec
 
 # 运行时生成
 sitecheck.version
 检测结果-*.md
+检测结果-*.json
+检测结果-*.html
+sitecheck-cli-output.txt
 
 # 本地工具输出（含本机 hosts 域名清单、DNS 实测数据，属隐私，默认不入库）
 hosts-audit.json
+hosts-verify-result.txt
 dns-bench.json
-hosts-体检报告.md
-hosts-体检报告-第二轮.md
-hosts-体检报告-第三轮.md
+hosts-体检报告*.md
 greasyfork-检测报告.md
-检测结果-greasyfork.md
-检测结果-github.com.md
+批量检测结果.csv

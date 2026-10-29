@@ -1,0 +1,15 @@
+# 统一按 LF 存入仓库，检出时 Windows 上也用 LF —— 避免 CI(Linux) 与本地(Windows)
+# 之间反复出现换行符 diff，也避免 .py 文件被 CRLF 污染后 ruff/测试表现不一致。
+* text=auto eol=lf
+
+# 二进制文件不做任何转换
+*.png  binary
+*.ico  binary
+*.exe  binary
+*.dll  binary
+*.pyd  binary
+*.zip  binary
+
+# 打包脚本自身按 CRLF 检出，方便在记事本里查看
+*.bat  text eol=crlf
+*.ps1  text eol=crlf

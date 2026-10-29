@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sitecheck"
+version = "2.0.0"
+description = "网站直连检测工具：逐层定位为什么打不开，只在 hosts 真能解决时才建议改 hosts"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "sitecheck contributors" }]
+keywords = ["dns", "tls", "sni", "hosts", "network", "diagnostics"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: Name Service (DNS)",
+    "Topic :: System :: Networking :: Monitoring",
+]
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PyQt5>=5.15"]
+dev = ["pytest>=7.4", "ruff>=0.4"]
+
+[project.scripts]
+sitecheck = "sitecheck.cli:main"
+sitecheck-gui = "sitecheck_gui.app:main"
+
+[project.urls]
+Homepage = "https://github.com/45944831/sitecheck"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sitecheck = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# UP031：项目统一用 % 格式化（中文字符串里 f-string 可读性更差）
+# UP009：源文件保留 # -*- coding: utf-8 -*- 声明
+# UP045：Optional[X] 与 X | None 混用不影响运行，不强制统一
+ignore = ["E501", "B008", "UP031", "UP009", "UP045"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
