@@ -35,6 +35,25 @@ class HostsError(Exception):
     """hosts 操作失败。message 为 NEED_ADMIN 时表示需要提权。"""
 
 
+# WinError 32 = ERROR_SHARING_VIOLATION，文件正被其他进程打开
+_SHARING_VIOLATION = 32
+_ACCESS_DENIED = 5
+
+
+def _blocked_reason(exc: PermissionError) -> str:
+    """判断 PermissionError 到底是"没权限"还是"文件被占用"。
+
+    Windows 上 hosts 被杀软或第三方 hosts 工具占用时同样抛 WinError 5，
+    直接当成"需要管理员权限"会把人引到反复提权的死路上。
+    """
+    code = getattr(exc, "winerror", None)
+    if code == _SHARING_VIOLATION:
+        return "in-use"
+    if code == _ACCESS_DENIED and is_admin():
+        return "in-use"
+    return "need-admin"
+
+
 # ---------------------------------------------------------------- 路径
 
 def backup_dir() -> Path:
@@ -252,11 +271,16 @@ def apply(domain: str, ips: list[str], path: Path = HOSTS_PATH) -> tuple[str, Op
     try:
         tmp.write_text(out, encoding=encoding, newline="")
         os.replace(tmp, path)
-    except PermissionError:
+    except PermissionError as exc:
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        if _blocked_reason(exc) == "in-use":
+            raise HostsError(
+                "hosts 文件被其他程序占用（WinError %s），常见于杀毒软件或其他 "
+                "hosts 工具正打开该文件。请关闭后重试，hosts 未改动（备份在 %s）"
+                % (getattr(exc, "winerror", "?"), bak)) from exc
         raise HostsError("NEED_ADMIN") from None
     except OSError as exc:
         try:
@@ -308,16 +332,38 @@ def is_admin() -> bool:
         return False
 
 
+def relaunch_target(args: list[str]) -> tuple[str, str]:
+    """构造提权重启的 (可执行文件, 命令行参数)。
+
+    打包成 exe 后 sys.executable 就是程序自身，参数原样传即可（app.py 见到
+    argv 会转交 CLI）。但开发模式下 sys.executable 是 python.exe 或 pip 生成的
+    启动器，直接把 args 拼上去会变成 `python.exe hosts --write ...`，
+    被解释器当成脚本路径，报 "can't open file 'hosts'"。
+    """
+    import sys
+
+    if getattr(sys, "frozen", False):
+        return sys.executable, subprocess.list2cmdline(args)
+
+    exe = Path(sys.executable)
+    if not exe.name.lower().startswith("python"):
+        # pip 的控制台启动器（如 sitecheck-gui.exe）：同目录的 sitecheck.exe 才是 CLI
+        cli = exe.with_name("sitecheck.exe" if os.name == "nt" else "sitecheck")
+        if cli.exists():
+            return str(cli), subprocess.list2cmdline(args)
+    return sys.executable, subprocess.list2cmdline(["-m", "sitecheck.cli", *args])
+
+
 def relaunch_as_admin(args: list[str]) -> bool:
     """以管理员身份重启自身。参数用 list2cmdline 拼接，避免引号注入。"""
     if os.name != "nt":
         return False
     try:
         import ctypes
-        import sys
-        params = subprocess.list2cmdline(args)
+
+        exe, params = relaunch_target(args)
         rc = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, params, None, 1)
+            None, "runas", exe, params, None, 1)
         return rc > 32
     except Exception:
         return False

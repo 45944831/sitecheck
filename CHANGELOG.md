@@ -2,6 +2,22 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 2.0.2 — 2026-11-16
+
+修复 hosts 写入在开发模式下的提权链路问题。
+
+### 写入 hosts 更稳
+
+- **提权重启不再跑错命令**。v2.0.1 的 `relaunch_as_admin` 只按 `sys.executable`
+  拼参数：打包成 exe 时可用，但源码运行或 pip 启动器场景下会变成
+  `python.exe hosts --write ...`，被解释器当成脚本路径，报
+  `can't open file 'hosts'`。现在按运行形态解析真正的 CLI 入口 ——
+  打包走程序自身，解释器走 `-m sitecheck.cli`，启动器转调同目录的 `sitecheck.exe`。
+- **区分"文件被占用"与"权限不足"**。Windows 上 hosts 被杀毒软件或其他 hosts
+  工具占用时同样抛 `WinError 5`，原先一律提示"需要管理员权限"，会让人反复提权
+  也解决不了。现在 `WinError 32`、或已提权仍报 `WinError 5` 时明确提示文件被占用，
+  并说明 hosts 未被改动、备份在哪里。
+
 ## 2.0.1 — 2026-10-29
 
 修复 v2.0.0 发布后暴露的几处判定与工程问题，并把安装包体积压掉一半。

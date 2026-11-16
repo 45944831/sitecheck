@@ -29,10 +29,10 @@ try:                                            # 正常安装时从包元数据
     from importlib.metadata import version as _pkg_version
     try:
         __version__ = _pkg_version("sitecheck")
-    except PackageNotFoundError:
-        __version__ = "2.0.1"
+    except PackageNotFoundError:                # 冻结成 exe 后没有 dist-info，走这里
+        __version__ = "2.0.2"
 except ImportError:                             # pragma: no cover
-    __version__ = "2.0.1"
+    __version__ = "2.0.2"
 
 from .models import Layer, Report, Verdict  # noqa: E402
 from .orchestrator import analyze, normalize_domain  # noqa: E402

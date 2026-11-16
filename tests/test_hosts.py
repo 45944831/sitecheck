@@ -8,6 +8,9 @@
 """
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
 
 from sitecheck import hosts as H
@@ -182,3 +185,68 @@ def test_backup_pruning(hosts_file):
     for i in range(H.MAX_BACKUPS + 4):
         H.apply("example.com", ["10.0.0.%d" % (i + 1)], hosts_file)
     assert len(H.list_backups()) <= H.MAX_BACKUPS
+
+
+# ---------------------------------------------------------------- 提权重启
+
+def test_relaunch_target_frozen_uses_self(monkeypatch):
+    """打包后 sys.executable 就是程序自身，CLI 参数原样传即可。"""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", r"C:\app\sitecheck.exe")
+    exe, params = H.relaunch_target(["hosts", "--write", "example.com"])
+    assert exe == r"C:\app\sitecheck.exe"
+    assert params == "hosts --write example.com"
+
+
+def test_relaunch_target_dev_python_uses_module(monkeypatch):
+    """开发模式必须走 -m sitecheck.cli；否则 python.exe 会把 'hosts' 当脚本路径。"""
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(sys, "executable", r"C:\Python310\python.exe")
+    exe, params = H.relaunch_target(["hosts", "--write", "example.com"])
+    assert exe.endswith("python.exe")
+    assert params.startswith("-m sitecheck.cli")
+    assert params.endswith("hosts --write example.com")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="启动器布局仅 Windows")
+def test_relaunch_target_prefers_cli_sibling(monkeypatch, tmp_path):
+    """pip 启动器场景：sitecheck-gui.exe 应转调同目录的 sitecheck.exe。"""
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    gui = tmp_path / "sitecheck-gui.exe"
+    cli = tmp_path / "sitecheck.exe"
+    gui.write_text("")
+    cli.write_text("")
+    monkeypatch.setattr(sys, "executable", str(gui))
+    exe, params = H.relaunch_target(["hosts", "--write", "example.com"])
+    assert exe == str(cli)
+    assert params == "hosts --write example.com"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="WinError 语义仅 Windows")
+def test_apply_reports_file_in_use_not_admin(hosts_file, monkeypatch):
+    """文件被占用（WinError 32）不能被误报成"需要管理员权限"。"""
+    def boom(_src, _dst):
+        raise PermissionError(13, "拒绝访问", None, 32)
+
+    monkeypatch.setattr(H.os, "replace", boom)
+    with pytest.raises(H.HostsError) as info:
+        H.apply("example.com", ["8.8.8.8"], hosts_file)
+
+    message = str(info.value)
+    assert message != "NEED_ADMIN"
+    assert "占用" in message
+    assert not (hosts_file.parent / (hosts_file.name + ".sitecheck.tmp")).exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="WinError 语义仅 Windows")
+def test_apply_needs_admin_without_privilege(hosts_file, monkeypatch):
+    """真正没权限（非管理员 + WinError 5）仍要给 NEED_ADMIN，让 GUI 去提权。"""
+    monkeypatch.setattr(H, "is_admin", lambda: False)
+
+    def boom(_src, _dst):
+        raise PermissionError(13, "拒绝访问", None, 5)
+
+    monkeypatch.setattr(H.os, "replace", boom)
+    with pytest.raises(H.HostsError) as info:
+        H.apply("example.com", ["8.8.8.8"], hosts_file)
+    assert str(info.value) == "NEED_ADMIN"

@@ -208,13 +208,44 @@ def main() -> int:
         target = os.path.join(ROOT, "dist", "sitecheck")
         _prune_payload(target)
         _copy_docs(target)
+        exe = os.path.join(target, "sitecheck.exe")
+    else:
+        _copy_docs(os.path.join(ROOT, "dist"))
+        exe = os.path.join(ROOT, "dist", "sitecheck.exe")
+
+    if not _verify_version(exe, version):
+        return 1
+
+    if mode == "onedir":
         print("[完成] 输出在 dist\\sitecheck\\ 目录")
         print("       运行：dist\\sitecheck\\sitecheck.exe")
         print("       分发：整个 dist\\sitecheck 文件夹一起拷贝，可压成 zip")
     else:
-        _copy_docs(os.path.join(ROOT, "dist"))
         print("[完成] 输出在 dist\\sitecheck.exe")
     return 0
+
+
+def _verify_version(exe: str, version: str) -> bool:
+    """产物自报版本必须与 pyproject 一致。
+
+    冻结后取不到包元数据，`__init__.py` 会退回硬编码版本号；两边一旦没同步，
+    发出去的包就是错的版本，而 CI 的冒烟测试只打印不校验，看不出来。
+    """
+    try:
+        proc = subprocess.run([exe, "--version"], capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print("[警告] 无法运行产物校验版本：%s" % exc)
+        return True
+
+    raw = (proc.stdout or b"") + (proc.stderr or b"")
+    reported = raw.decode("utf-8", "replace").strip()
+    if version in reported:
+        print("       产物自报版本：%s" % reported)
+        return True
+
+    print("[失败] 产物自报版本异常：%r（期望包含 %s）；"
+          "请检查 src/sitecheck/__init__.py 里的硬编码兜底" % (reported, version))
+    return False
 
 
 def _dir_size(path: str) -> int:
