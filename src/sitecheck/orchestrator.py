@@ -212,7 +212,7 @@ def _check_control(domain: str, timeout: float, progress: ProgressFn,
 def collect_candidates(report: Report, extra_ips: list[str]) -> list[tuple[str, str]]:
     """汇总候选 IP 并标注来源。返回 [(ip, 来源)]。
 
-    来源优先级：手动 > hosts > 解析 > 候选。
+    来源优先级：手动 > hosts > 解析 > 远程源 > 候选。
     v1.0 把 hosts 已有条目也纳入探测是对的 —— 用户真正想问的
     往往是"我现在 hosts 里这条还能不能用"。
     """
@@ -248,6 +248,11 @@ def collect_candidates(report: Report, extra_ips: list[str]) -> list[tuple[str, 
         add(ip, "hosts")
     for ip in from_dns:
         add(ip, "解析")
+
+    # 远程 hosts 情报源：DNS 污染时本地解析结果全是假的，这是唯一
+    # 不依赖本机解析路径的补充渠道。它只是候选，仍须通过证书校验。
+    for ip in dnsmod.fetch_remote_ips(report.domain):
+        add(ip, "远程源")
 
     # 系统解析栈的结果（会读 hosts）也纳入，标注为"候选"
     for ip in dnsmod.system_resolve(report.domain):
@@ -370,7 +375,7 @@ def _proxy_crosscheck(domain: str, probes: list[ProbeResult],
     if silent:
         targets = sorted(silent, key=lambda p: p.tcp_ms)[:1]
     elif not any(p.genuine for p in probes):
-        priority = {"手动": 0, "hosts": 1, "解析": 2, "候选": 3}
+        priority = {"手动": 0, "hosts": 1, "解析": 2, "远程源": 3, "候选": 4}
         targets = sorted(probes, key=lambda p: (priority.get(p.source, 9),
                                                 p.tcp_ms))[:2]
     else:

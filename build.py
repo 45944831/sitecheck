@@ -29,6 +29,7 @@ import time
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(ROOT, "src")
 ENTRY = os.path.join(SRC, "sitecheck_gui", "app.py")
+ICON = os.path.join(SRC, "sitecheck_gui", "assets", "sitecheck.ico")
 
 # 用不到的 Qt 模块，剔除后体积更小、加载更快
 EXCLUDE = [
@@ -193,6 +194,18 @@ def main() -> int:
     ]
     for module in EXCLUDE:
         cmd += ["--exclude-module", module]
+
+    if os.path.exists(ICON):
+        cmd += [
+            "--icon", ICON,
+            # 窗口图标在运行时要读同一份文件，必须一起放进去；
+            # 目标目录与包内路径保持一致，_load_icon() 才能按 __file__ 定位。
+            "--add-data", "%s%s%s" % (ICON, os.pathsep,
+                                       os.path.join("sitecheck_gui", "assets")),
+        ]
+    else:
+        print("[警告] 未找到 %s，产物将使用默认图标" % ICON)
+
     cmd.append(ENTRY)
 
     prepare_dist(os.path.join(ROOT, "dist", "sitecheck"))

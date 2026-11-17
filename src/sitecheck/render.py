@@ -130,6 +130,8 @@ def render_markdown(report: Report) -> str:
         if verdict.evidence:
             add("- **依据**：%s" % verdict.evidence)
         add("- **hosts 建议**：%s" % verdict.hosts_advice)
+        if verdict.fix_hint:
+            add("- **下一步**：%s" % verdict.fix_hint)
     add("")
 
     # ---- 优化建议
@@ -301,6 +303,12 @@ def render_html(report: Report) -> str:
         add("<div style='margin-bottom:10px;font-size:9.5pt;'>"
             "<b>hosts 建议：</b>%s</div>"
             % _esc(verdict.hosts_advice).replace("\n", "<br>"))
+
+        if verdict.fix_hint:
+            add("<div style='background:#eef4fb;border-left:3px solid #2b6cf0;"
+                "padding:8px 10px;margin-bottom:10px;font-size:9.5pt;"
+                "color:#243447;'><b>下一步：</b>%s</div>"
+                % _esc(verdict.fix_hint).replace("\n", "<br>"))
 
     # 真实 IP
     if report.real_ips:

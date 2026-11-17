@@ -8,6 +8,8 @@
     3. 备份移出 etc 目录，改到 %LOCALAPPDATA%\\sitecheck\\backups，并支持还原。
     4. 保留原换行风格（v1.0 一律改成 CRLF，git 管理时整文件 diff）。
     5. IP 参数强校验，拒绝把任意字符串写进 hosts。
+    6. 跨平台：路径 / 备份目录 / 占用判定 / DNS 刷新按平台分派，
+       Windows 行为与 v2.0.x 完全一致。
 """
 from __future__ import annotations
 
@@ -16,12 +18,30 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_HOSTS = Path(r"C:\Windows\System32\drivers\etc\hosts")
+
+def _is_windows() -> bool:
+    """平台判定单独抽出，便于测试注入而不污染全局 os.name。"""
+    return os.name == "nt"
+
+
+def _platform_name() -> str:
+    return sys.platform
+
+
+def default_hosts_path() -> Path:
+    """系统 hosts 路径。Windows 保持原路径，其余平台走 /etc/hosts。"""
+    if _is_windows():
+        return Path(r"C:\Windows\System32\drivers\etc\hosts")
+    return Path("/etc/hosts")
+
+
+DEFAULT_HOSTS = default_hosts_path()
 
 # 允许测试与特殊部署覆盖路径
 HOSTS_PATH = Path(os.environ.get("SITECHECK_HOSTS") or DEFAULT_HOSTS)
@@ -35,9 +55,11 @@ class HostsError(Exception):
     """hosts 操作失败。message 为 NEED_ADMIN 时表示需要提权。"""
 
 
-# WinError 32 = ERROR_SHARING_VIOLATION，文件正被其他进程打开
+# WinError 32 = ERROR_SHARING_VIOLATION；POSIX errno 16 = EBUSY
 _SHARING_VIOLATION = 32
 _ACCESS_DENIED = 5
+_EBUSY = 16
+_EACCES = 13
 
 
 def _blocked_reason(exc: PermissionError) -> str:
@@ -45,11 +67,19 @@ def _blocked_reason(exc: PermissionError) -> str:
 
     Windows 上 hosts 被杀软或第三方 hosts 工具占用时同样抛 WinError 5，
     直接当成"需要管理员权限"会把人引到反复提权的死路上。
+    POSIX 侧对应 EBUSY / EACCES(已提权) 的语义相同。
     """
-    code = getattr(exc, "winerror", None)
-    if code == _SHARING_VIOLATION:
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        if winerror == _SHARING_VIOLATION:
+            return "in-use"
+        if winerror == _ACCESS_DENIED and is_admin():
+            return "in-use"
+        return "need-admin"
+    errno = getattr(exc, "errno", None)
+    if errno == _EBUSY:
         return "in-use"
-    if code == _ACCESS_DENIED and is_admin():
+    if errno == _EACCES and is_admin():
         return "in-use"
     return "need-admin"
 
@@ -57,8 +87,13 @@ def _blocked_reason(exc: PermissionError) -> str:
 # ---------------------------------------------------------------- 路径
 
 def backup_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-    root = Path(base) if base else Path.home() / ".sitecheck"
+    """备份放独立数据目录，绝不放 etc 目录（避免被系统工具扫描/污染）。"""
+    if _is_windows():
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        root = Path(base) if base else Path.home() / ".sitecheck"
+    else:
+        base = os.environ.get("XDG_DATA_HOME")
+        root = Path(base) if base else Path.home() / ".local" / "share"
     return root / "sitecheck" / "backups"
 
 
@@ -277,10 +312,11 @@ def apply(domain: str, ips: list[str], path: Path = HOSTS_PATH) -> tuple[str, Op
         except OSError:
             pass
         if _blocked_reason(exc) == "in-use":
+            code = getattr(exc, "winerror", None) or getattr(exc, "errno", "?")
             raise HostsError(
-                "hosts 文件被其他程序占用（WinError %s），常见于杀毒软件或其他 "
+                "hosts 文件被其他程序占用（错误码 %s），常见于杀毒软件或其他 "
                 "hosts 工具正打开该文件。请关闭后重试，hosts 未改动（备份在 %s）"
-                % (getattr(exc, "winerror", "?"), bak)) from exc
+                % (code, bak)) from exc
         raise HostsError("NEED_ADMIN") from None
     except OSError as exc:
         try:
@@ -301,35 +337,61 @@ def flush_dns() -> tuple[bool, str]:
     ipconfig 的输出是 GBK 编码，不能依赖 locale 推断（在 UTF-8 终端下会乱码），
     所以按字节取回再逐个编码尝试。
     """
-    if os.name != "nt":
-        return True, "非 Windows，跳过"
-    try:
-        proc = subprocess.run(["ipconfig", "/flushdns"], capture_output=True,
-                              timeout=25)
-        ok = proc.returncode == 0
-        raw = (proc.stdout or b"") + (proc.stderr or b"")
-        detail = ""
-        for encoding in ("gbk", "utf-8", "latin-1"):
-            try:
-                detail = raw.decode(encoding).strip()
-                break
-            except UnicodeDecodeError:
-                continue
-        return ok, detail[:200] or ("成功" if ok else "无输出")
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, str(exc)[:120]
+    if _is_windows():
+        try:
+            proc = subprocess.run(["ipconfig", "/flushdns"], capture_output=True,
+                                  timeout=25)
+            ok = proc.returncode == 0
+            raw = (proc.stdout or b"") + (proc.stderr or b"")
+            detail = ""
+            for encoding in ("gbk", "utf-8", "latin-1"):
+                try:
+                    detail = raw.decode(encoding).strip()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            return ok, detail[:200] or ("成功" if ok else "无输出")
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, str(exc)[:120]
+
+    # POSIX：hosts 的改动本身立即生效。刷新只是为了清掉浏览器 / 解析器
+    # 可能缓存的旧结果；这些命令在精简发行版里可能不存在，那不算失败。
+    if _platform_name() == "darwin":
+        commands = [["dscacheutil", "-flushcache"],
+                    ["killall", "-HUP", "mDNSResponder"]]
+    else:
+        commands = [["resolvectl", "flush-caches"]]
+    done: list[str] = []
+    for cmd in commands:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=15)
+            if proc.returncode == 0:
+                done.append(cmd[0])
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return True, ("%s 已刷新" % "、".join(done) if done
+                  else "该平台无需刷新（hosts 改动即时生效）")
 
 
 # ---------------------------------------------------------------- 提权
 
 def is_admin() -> bool:
-    if os.name != "nt":
+    if not _is_windows():
         return os.geteuid() == 0
     try:
         import ctypes
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+def admin_hint(example: str = "") -> str:
+    """平台相关的提权提示，避免把 sudo 用户引去"右键管理员"。"""
+    if _is_windows():
+        base = "请以管理员身份运行终端后重试"
+    else:
+        base = "请用 sudo 提权后重试"
+    return base + ("：sitecheck %s" % example if example else "")
 
 
 def relaunch_target(args: list[str]) -> tuple[str, str]:
@@ -348,7 +410,7 @@ def relaunch_target(args: list[str]) -> tuple[str, str]:
     exe = Path(sys.executable)
     if not exe.name.lower().startswith("python"):
         # pip 的控制台启动器（如 sitecheck-gui.exe）：同目录的 sitecheck.exe 才是 CLI
-        cli = exe.with_name("sitecheck.exe" if os.name == "nt" else "sitecheck")
+        cli = exe.with_name("sitecheck.exe" if _is_windows() else "sitecheck")
         if cli.exists():
             return str(cli), subprocess.list2cmdline(args)
     return sys.executable, subprocess.list2cmdline(["-m", "sitecheck.cli", *args])
@@ -356,7 +418,7 @@ def relaunch_target(args: list[str]) -> tuple[str, str]:
 
 def relaunch_as_admin(args: list[str]) -> bool:
     """以管理员身份重启自身。参数用 list2cmdline 拼接，避免引号注入。"""
-    if os.name != "nt":
+    if not _is_windows():
         return False
     try:
         import ctypes

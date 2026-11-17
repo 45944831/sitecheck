@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- sitecheck 图标：放大镜（逐层检测）+ 绿色对勾（定位到可用链路） -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2B6CF0"/>
+      <stop offset="1" stop-color="#00B8D9"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.20"/>
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="112" fill="url(#gloss)"/>
+
+  <!-- 手柄先画，压在镜圈下方 -->
+  <path d="M324 300 L410 386" stroke="#FFFFFF" stroke-width="52" stroke-linecap="round"/>
+
+  <!-- 镜片底色 -->
+  <circle cx="236" cy="212" r="124" fill="#FFFFFF" fill-opacity="0.12"/>
+  <!-- 镜圈 -->
+  <circle cx="236" cy="212" r="124" fill="none" stroke="#FFFFFF" stroke-width="44"/>
+
+  <!-- 对勾 -->
+  <path d="M182 212 L219 251 L293 171" fill="none" stroke="#33E08F" stroke-width="44"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

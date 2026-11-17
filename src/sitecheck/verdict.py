@@ -111,7 +111,7 @@ def _best_probe(probes: list[ProbeResult]) -> Optional[ProbeResult]:
 
 # ---------------------------------------------------------------- 主判定
 
-def judge(report: Report) -> Verdict:
+def _judge_impl(report: Report) -> Verdict:
     """产出最终结论。所有文案都在这里，渲染层只负责排版。"""
     dns_ips = dns_union(report)
     doh_ips = doh_union(report)
@@ -424,3 +424,70 @@ def build_tips(report: Report, best: Optional[ProbeResult]) -> list[str]:
                     % lines)
 
     return tips
+
+
+# ---------------------------------------------------------------- 下一步动作
+
+def build_fix_hint(report: Report, verdict: Verdict) -> str:
+    """把结论翻译成现在该做什么。与 evidence（为什么）严格分开。
+
+    每条都必须可操作：给出具体命令或明确的"不要做什么"，
+    不写"建议检查网络"这类无法执行的话。
+    """
+    layer = verdict.layer
+    domain = report.domain
+
+    if layer is Layer.SUCCESS:
+        if verdict.hosts_write_needed and verdict.hosts_entry_ips:
+            ip = verdict.hosts_entry_ips[0]
+            return ("要固定这条可用链路：sitecheck %s --ip %s --apply-hosts"
+                    "（会先备份再写入，可用 sitecheck hosts --restore 回滚）"
+                    % (domain, ip))
+        return "无需改动配置；可用 --report / --json 导出本次报告留档。"
+
+    if layer is Layer.HTTP_REJECT:
+        return ("用浏览器直接打开 %s 复测：若浏览器正常，说明只是工具发的是极简请求头，"
+                "被反爬 / WAF 拦了，无需处理。" % domain)
+
+    if layer is Layer.PROXY_REQUIRED:
+        return ("保持浏览器走代理即可，不要改 hosts。"
+                "若要让命令行工具也通：设置 HTTPS_PROXY=%s 后重试。" % report.proxy.url)
+
+    if layer is Layer.HTTP_NO_RESPONSE:
+        return ("用浏览器复测 %s；若浏览器也不通，"
+                "临时关闭安全软件 / 防火墙后再测一次。DNS 和证书都已正确，改 hosts 无效。"
+                % domain)
+
+    if layer is Layer.INCONCLUSIVE:
+        if report.incomplete:
+            return "重跑时加大时限：sitecheck %s --deadline 90" % domain
+        return "先确认能打开任意网站，再重跑 sitecheck %s。" % domain
+
+    if layer is Layer.DNS_POISONED:
+        return ("从官方渠道拿到真实 IP 后先验证：sitecheck %s --ip <IP>。"
+                "只有报告确认「真实 IP / 证书匹配」才考虑写入 hosts。" % domain)
+
+    if layer is Layer.TLS_BLOCKED:
+        return "hosts 改到这里无效；需要代理或加密隧道，不要在 hosts 上继续尝试。"
+
+    if layer is Layer.TCP_BLOCKED:
+        return ("换一个网络环境（如手机热点）复测；若仍不通，"
+                "问题在服务端或端口策略，改 hosts 无效。")
+
+    if layer is Layer.DNS_FAIL:
+        return ("先核对域名拼写与有效期；确认无误后换用加密 DNS "
+                "（sitecheck dns-bench 可查看哪家更快且未被污染）。")
+
+    return "用 sitecheck %s --ip <可信 IP> 重试，或在网络正常的环境复测。" % domain
+
+
+def judge(report: Report) -> Verdict:
+    """对外入口：判定 + 统一的下一步动作。
+
+    包一层而不是在每个 return 分支里填 fix_hint —— 分支有十个，
+    分散填写迟早会漏；这里集中保证每条结论都有动作。
+    """
+    result = _judge_impl(report)
+    if not result.fix_hint:
+        result.fix_hint = build_fix_hint(report, result)
+    return result

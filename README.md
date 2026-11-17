@@ -66,8 +66,42 @@ sitecheck hosts --restore                     # 还原最新备份
 sitecheck hosts --restore 1                   # 还原第 1 个（0 是最新）
 
 sitecheck dns-bench                           # 公共 DNS 延迟 / 防污染基准测试
+sitecheck github.com --watch --interval 60    # 持续监控，只记录变化，不自动改 hosts
+sitecheck --profile github                    # 一次检查主站 / API / Raw / 下载四条链路
+sitecheck family github                       # 核验 GitHub 全部 40 个关联域名（图片/下载/API/Copilot…）
+sitecheck family github --apply-hosts         # 把检测到可用真实 IP 的域名批量写入 hosts
 sitecheck --version
 ```
+
+`--watch` 用 `--count N` 限定检测次数、`--confirm N` 过滤抖动（连续 N 次同状态才算变化）、`--watch-json <路径>` 导出事件时间线。退出码取最后一次检测的结论。
+
+`--profile` 并发检测多条链路，给出聚合结论；部分可用时退出码为 20，任何一条证据不足时整体判为无法判定，不会含糊报"部分可用"。
+
+### 域名族核验（`family`）
+
+解决"只修了 github.com，网页能开但图片/下载照样挂"的问题：一次发现并检测一个服务的**整族关联域名**。
+
+```bash
+sitecheck family github                 # 核验全部 40 个域名，按分组列出状态
+sitecheck family github --json r.json   # 同时导出 JSON
+sitecheck family github --apply-hosts   # 批量写入（先展示完整改动计划再确认）
+```
+
+域名清单来自 GitHub520 与 GitHub 官方 meta API 交叉核对（2026-11-17），共 40 个：31 个落在 GitHub 自有 IP 段、适合固定 hosts；9 个走第三方 CDN（S3 / Fastly / Azure），**只检测、不写入**（写了反而容易失效）。候选 IP 一律运行时现取并做 TLS 证书校验，不因情报源声称可用就直接写入。
+
+状态含义：`可用`（当前系统解析的 IP 就能用）、`可修复`（当前不通但找到了已验证的真实 IP，`--apply-hosts` 会写这些）、`不可用`（候选 IP 均未通过证书校验，多为间歇性网络封锁）、`无法判定`（证据不足）。
+
+⚠️ 批量写入会逐个域名替换 hosts 条目，每个域名写入前单独备份；写入后统一刷新 DNS 缓存。需要管理员权限。第三方 CDN 域名自动排除。
+
+**退出码**（便于脚本按结论分支）：
+
+```
+0 可直连 | 2 参数错误 | 3 无法判定 | 4 报告写入失败
+10 服务端拒绝 | 11 需代理 | 12 应用层无响应 | 13 DNS 污染
+14 TLS/SNI 阻断 | 15 TCP 不通 | 16 解析失败 | 19 未知 | 20 部分可用
+```
+
+只判断成功 / 失败的旧脚本行为不变。JSON 报告带 `schema_version`，字段含义变化时才递增。每条结论都带 `fix_hint`（下一步具体动作），与 `evidence`（为什么这么判）分开。
 
 `sitecheck github.com` 与 `sitecheck check github.com` 等价 —— 保留 v1.0 的调用方式。
 
@@ -96,6 +130,8 @@ sitecheck-gui
 
 **候选 IP 必须包含 hosts 文件里已有的条目。** 用户问"这个域名能不能访问"时，真正想问的往往是"我现在 hosts 里这条还能不能用"。只探测 DNS 解析结果会漏掉用户当前的生效配置——DNS 被污染时那些解析结果全是假 IP。
 
+**候选 IP 还有一个不依赖本机解析的来源。** DNS 被污染时本机所有解析结果都可能是假的，此时会从远程 hosts 情报源（默认 GitHub520，可用 `SITECHECK_REMOTE_HOSTS_URL` 覆盖）取候选。它只是"情报"不是"证据"—— 仍必须通过证书校验才会被认定为真实 IP；源不可达时静默降级，不影响检测。
+
 **控制组有否决权。** 控制组（多个不同运营商的站点）全部不通时，说明本机出网受限，此时"目标站点 TCP 不通"的结论毫无意义，直接判 `INCONCLUSIVE`，而不是把责任推给目标站。
 
 **探测方式和用户实际访问方式必须一致。** 浏览器走系统代理，工具也测一遍代理路径。直连不通、经代理可通时，明确告诉你这是本机代理配置问题，不要改 hosts。
@@ -122,7 +158,7 @@ sitecheck-gui
 
 ```bash
 pip install -e ".[dev,gui]"
-pytest -q                     # 84 个测试，全部不依赖网络
+pytest -q                     # 182 个测试，全部不依赖网络
 ruff check src tests
 python build.py               # 打包 onedir（默认）
 python build.py onefile       # 单文件，启动 23~35 秒，不推荐
@@ -142,6 +178,11 @@ src/sitecheck/
 ├── audit.py         hosts 体检
 ├── dnsbench.py      DNS 基准测试
 ├── render.py        Markdown / JSON / HTML
+├── exitcodes.py     语义化退出码
+├── watch.py         持续监控与事件时间线（抖动抑制）
+├── profile.py       服务画像：多链路并发检测与聚合判定
+├── family.py        服务域名族清单（用途分组、是否适合固定 hosts）
+├── familycheck.py   域名族轻量核验与批量写入计划
 └── cli.py           命令行入口
 src/sitecheck_gui/app.py     PyQt5 界面
 ```

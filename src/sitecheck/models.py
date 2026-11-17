@@ -45,6 +45,9 @@ class HttpStatus(str, Enum):
     SKIPPED = "skipped"         # 前置条件不满足，未发起请求
 
 
+SCHEMA_VERSION = 2
+
+
 class Layer(str, Enum):
     """阻断点。值沿用 v1.0 的命名，保证报告和历史记录可对照。"""
     SUCCESS = "SUCCESS"
@@ -214,6 +217,9 @@ class Verdict:
     hosts_write_needed: bool = False
     hosts_entry_ips: list[str] = field(default_factory=list)
     proxy_note: str = ""
+    # 下一步可操作动作，与「依据」「hosts 建议」分开：
+    # 依据解释为什么，fix_hint 说明现在该做什么。
+    fix_hint: str = ""
 
 
 @dataclass
@@ -235,6 +241,8 @@ class Report:
     extra_ips: list[str] = field(default_factory=list)
     # 非空表示探测被取消或整体超时（值即原因），结论只能是不完整
     incomplete: str = ""
+    # JSON 结构版本：字段含义变化时才递增，普通发版不动。
+    schema_version: int = SCHEMA_VERSION
 
     @property
     def genuine_probes(self) -> list[ProbeResult]:

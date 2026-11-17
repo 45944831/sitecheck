@@ -13,9 +13,11 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import socket
 import ssl
+import tempfile
 import time
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -116,6 +118,38 @@ def _days_left(not_after: str) -> Optional[int]:
         return None
 
 
+def _peercert_dict(tls_sock: ssl.SSLSocket) -> dict:
+    """取对端证书内容，兼容 CERT_NONE 模式。
+
+    CPython 有个坑：verify_mode=CERT_NONE 时 getpeercert() 返回空字典，
+    尽管底层其实拿到了 DER 证书。降级校验走的正是这条路径 —— 若直接
+    用空字典，就会把"链不可信但 SAN 匹配"的真实 IP 误判成"无 CN、
+    证书主体不匹配"，进而判成 DNS 污染。这里在字典为空时改从 DER 解码。
+    """
+    cert = tls_sock.getpeercert()
+    if cert:
+        return cert
+    try:
+        der = tls_sock.getpeercert(binary_form=True)
+        if not der:
+            return {}
+        pem = ssl.DER_cert_to_PEM_cert(der)
+        fd, path = tempfile.mkstemp(suffix=".pem")
+        try:
+            with os.fdopen(fd, "w", encoding="ascii") as fh:
+                fh.write(pem)
+            # ssl 没有公开的 DER 解码 API；_test_decode_cert 是 CPython
+            # 自带且长期稳定可用的方案，避免为此引入 cryptography 依赖。
+            return ssl._ssl._test_decode_cert(path) or {}  # noqa: SLF001
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    except (AttributeError, OSError, ValueError, ssl.SSLError):
+        return {}
+
+
 def _extract_cert(cert: dict, host: str) -> dict:
     cn = ""
     for rdn in cert.get("subject", ()):
@@ -141,8 +175,7 @@ def _handshake(ip: str, host: str, port: int, timeout: float,
     sock = _connect(ip, port, timeout, proxy_info)
     try:
         with ctx.wrap_socket(sock, server_hostname=host) as tls_sock:
-            cert = tls_sock.getpeercert() or {}
-            info = _extract_cert(cert, host)
+            info = _extract_cert(_peercert_dict(tls_sock), host)
             cipher = tls_sock.cipher() or ("", "", 0)
             try:
                 alpn = tls_sock.selected_alpn_protocol() or ""

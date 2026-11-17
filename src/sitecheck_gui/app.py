@@ -16,9 +16,10 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+from pathlib import Path
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QIcon
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -886,6 +887,24 @@ def _prepare_console() -> None:
             pass
 
 
+def _load_icon() -> QIcon:
+    """窗口 / 任务栏图标。
+
+    开发态从包目录读；打包后资源在 _MEIPASS/sitecheck_gui/assets。
+    两种情况下 `__file__` 一般都能指到，但不同 PyInstaller 版本对冻结模块
+    `__file__` 的处理有差异，所以再按 _MEIPASS 兜一次，避免图标静默丢失。
+    """
+    candidates = [Path(__file__).resolve().parent / "assets" / "sitecheck.ico"]
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidates.append(Path(base) / "sitecheck_gui" / "assets" / "sitecheck.ico")
+
+    for path in candidates:
+        if path.exists():
+            return QIcon(str(path))
+    return QIcon()
+
+
 def run() -> int:
     # 带参数 -> 命令行模式，不加载任何 Qt 窗口
     if len(sys.argv) > 1:
@@ -899,6 +918,7 @@ def run() -> int:
     app.setStyle("Fusion")
     app.setApplicationName("sitecheck")
     app.setApplicationVersion(APP_VERSION)
+    app.setWindowIcon(_load_icon())
     window = MainWindow()
     window.show()
     return app.exec_()

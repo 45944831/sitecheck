@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
+import os
 import random
 import socket
 import struct
@@ -40,6 +42,14 @@ DOH_ENDPOINTS: list[tuple[str, str]] = [
     ("https://dns.alidns.com/dns-query", "DoH 阿里"),
     ("https://doh.pub/dns-query", "DoH 腾讯"),
 ]
+
+# 远程 hosts 情报源。它跟 DNS 查询是两回事：这里只是拿一份别人维护的
+# 域名->IP 清单当候选，不参与"UDP 与 DoH 是否一致"的污染推论，
+# 所以不受 DoH 强制不走代理那条约束限制。
+REMOTE_HOSTS_URL = os.environ.get("SITECHECK_REMOTE_HOSTS_URL",
+                                  "https://raw.hellogithub.com/hosts")
+REMOTE_CACHE_TTL = 600.0       # 成功结果缓存 10 分钟
+REMOTE_FAIL_TTL = 60.0         # 失败后 1 分钟内不再重试，避免 watch 每轮都等超时
 
 
 # ---------------------------------------------------------------- wire 编解码
@@ -306,3 +316,72 @@ def system_resolve(host: str) -> list[str]:
         if addr not in out:
             out.append(addr)
     return out
+
+
+# ---------------------------------------------------------------- 远程 hosts 情报源
+
+def parse_hosts_mapping(text: str) -> dict[str, list[str]]:
+    """把 hosts 文本解析成 {域名: [IP]}。纯函数，可离线测试。
+
+    只认合法 IP 开头的行；注释、裸 IP、非法地址一律跳过 —— 这些正是
+    之前在真实 hosts 里发现过的垃圾行，不能让它们流进候选池。
+    """
+    mapping: dict[str, list[str]] = {}
+    for raw_line in text.splitlines():
+        code = raw_line.split("#", 1)[0].strip()
+        if not code:
+            continue
+        parts = code.split()
+        if len(parts) < 2:
+            continue
+        ip = parts[0]
+        try:
+            ip = str(ipaddress.ip_address(ip))
+        except ValueError:
+            continue
+        for name in parts[1:]:
+            host = name.lower().strip(".")
+            if not host:
+                continue
+            ips = mapping.setdefault(host, [])
+            if ip not in ips:
+                ips.append(ip)
+    return mapping
+
+
+_remote_cache: dict[str, tuple[float, dict[str, list[str]], bool]] = {}
+
+
+def fetch_remote_ips(domain: str, timeout: float = 3.0,
+                     url: str = "") -> list[str]:
+    """从远程 hosts 源取该域名的候选 IP。任何失败都静默返回空列表。
+
+    DNS 被污染时本机所有解析结果都可能是假 IP，这个源是唯一不依赖
+    本机解析路径的补充渠道。它是"情报"不是"证据"——候选项仍必须
+    过证书校验才会被当成真实 IP。
+    """
+    url = url or REMOTE_HOSTS_URL
+    if not url:
+        return []
+    host = domain.lower().strip(".")
+
+    cached = _remote_cache.get(url)
+    if cached:
+        stamp, mapping, failed = cached
+        ttl = REMOTE_FAIL_TTL if failed else REMOTE_CACHE_TTL
+        if time.monotonic() - stamp < ttl:
+            return list(mapping.get(host, []))
+
+    try:
+        req = urllib.request.Request(url, headers={
+            "user-agent": "sitecheck/2.1",
+            "accept": "text/plain, */*",
+        })
+        with urllib.request.urlopen(req, timeout=max(0.5, timeout)) as resp:
+            text = resp.read(512 * 1024).decode("utf-8", errors="replace")
+        mapping = parse_hosts_mapping(text)
+        _remote_cache[url] = (time.monotonic(), mapping, False)
+    except (urllib.error.URLError, OSError, ValueError):
+        _remote_cache[url] = (time.monotonic(), {}, True)
+        return []
+    return list(mapping.get(host, []))
