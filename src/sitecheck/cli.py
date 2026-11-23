@@ -282,6 +282,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     text = rendermod.render_markdown(report)
     print(text)
 
+    # 命令行专用动作（含命令）只在终端显示，绝不写进报告 / GUI —— GUI 用户
+    # 没法输入命令，写 --report / --json 只会让人困惑（v2.0.3 的真实反馈）。
+    if not args.quiet and report.verdict and report.verdict.cli_hint:
+        print(style.dim("\n命令行提示：%s" % report.verdict.cli_hint))
+
     # 导出
     outputs_ok = _write_outputs(report, args, style)
 

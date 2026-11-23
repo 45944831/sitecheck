@@ -44,21 +44,25 @@ def test_success_with_hosts_advice_gives_concrete_command():
     verdict = judge(report)
     assert verdict.layer is Layer.SUCCESS
     assert verdict.hosts_write_needed
-    assert "--ip 9.9.9.9 --apply-hosts" in verdict.fix_hint
-    assert "--restore" in verdict.fix_hint
+    # 命令只在 cli_hint，fix_hint 是纯动作，绝不出现在报告 / GUI 里
+    assert "--ip 9.9.9.9 --apply-hosts" in verdict.cli_hint
+    assert "--restore" in verdict.cli_hint
+    assert "--" not in verdict.fix_hint
+    assert "9.9.9.9" in verdict.fix_hint
 
 
 def test_incomplete_hint_raises_deadline():
     report = make_report(incomplete="整体超时", probes=[])
     verdict = judge(report)
-    assert "--deadline 90" in verdict.fix_hint
+    assert "--deadline 90" in verdict.cli_hint
+    assert "--" not in verdict.fix_hint
 
 
 def test_dns_poisoned_hint_requires_verification():
     report = make_report(probes=[probe("1.2.3.4", tls=tls_mismatch())])
     verdict = judge(report)
     assert verdict.layer is Layer.DNS_POISONED
-    assert "--ip" in verdict.fix_hint
+    assert "--ip" in verdict.cli_hint
     assert "证书" in verdict.fix_hint
 
 

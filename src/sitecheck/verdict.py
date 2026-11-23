@@ -31,6 +31,27 @@ def _fmt_ips(ips: list[str], limit: int = 4) -> str:
     return shown + ("…" if len(ips) > limit else "")
 
 
+def hosts_state_note(report: Report) -> str:
+    """本机已有 hosts 条目时，说明其中哪些当前失效。
+
+    hosts 优先于 DNS：写了坏条目会覆盖正常解析。报告里若已有条目，
+    绝不能只说「不要改 hosts」——必须指出条目本身可能就是问题源。
+    """
+    if not report.hosts:
+        return ""
+    lines = "、".join(str(no) for no, _ip in report.hosts)
+    bad = [p.ip for p in report.probes
+           if p.ip in report.hosts_ips and p.tls
+           and not p.tls.handshake_ok]
+    if bad:
+        return ("本机 hosts 已有 %d 条该域名条目（第 %s 行），其中 %s 当前 TLS 握手失败。"
+                "hosts 优先于 DNS，这些失效条目会覆盖正常解析 —— "
+                "建议先清理这些条目再复测，而不是继续新增。"
+                % (len(report.hosts), lines, "、".join(bad)))
+    return ("本机 hosts 已有 %d 条该域名条目（第 %s 行），这些条目当前未见 TLS 失败。"
+            % (len(report.hosts), lines))
+
+
 def dns_union(report: Report) -> list[str]:
     """所有 UDP DNS 服务器解析出的 IP 并集 —— 即"DNS 给的 IP"。"""
     out: list[str] = []
@@ -205,14 +226,19 @@ def _judge_impl(report: Report) -> Verdict:
         if report.proxy.present:
             proxy_hint = ("本机配置了代理（%s），直连探测结果可能与浏览器实际体验不一致，"
                           "请以浏览器为准。" % report.proxy.url)
+        hosts_note = hosts_state_note(report)
+        if hosts_note:
+            hosts_advice = hosts_note
+        else:
+            hosts_advice = ("不要改 hosts：DNS 解析和证书都已确认正确。"
+                            "建议检查本机代理 / 防火墙设置，或用浏览器实测确认。")
         return Verdict(
             layer=Layer.HTTP_NO_RESPONSE,
             headline="TLS 与证书均正常，但 HTTP 层无响应",
             evidence=("对 %s 的 TLS 握手成功、证书确认属于该站，但 HTTP 请求没有得到有效响应"
                       "（%s）。这说明连接在应用层中断 —— 不是 DNS 问题，也不是证书问题。"
                       "%s" % (best.ip, detail, proxy_hint)),
-            hosts_advice=("不要改 hosts：DNS 解析和证书都已确认正确。"
-                          "建议检查本机代理 / 防火墙设置，或用浏览器实测确认。"),
+            hosts_advice=hosts_advice,
         )
 
     # ---- 4.5 探测被取消 / 整体超时：证据不完整，不做负面推断
@@ -248,14 +274,23 @@ def _judge_impl(report: Report) -> Verdict:
                and p.tls.status is TlsStatus.BLOCKED]
     if blocked:
         detail = blocked[0].tls.detail if blocked[0].tls else ""
+        evidence = ("对 %d 个 IP 的 443 端口 TCP 连接均成功，但 TLS 握手阶段被中断（%s）。"
+                    "阻断发生在 SNI 层：客户端发出明文域名后才被切断。"
+                    % (len(blocked), detail or "RST 或无响应"))
+        if report.sni_control:
+            evidence += "对照实验：" + report.sni_control.text + "。"
+        advice = "添加 hosts 无效。hosts 只影响 DNS 解析，够不到 SNI 这一层。"
+        # CDN 归属是诊断信息：Anycast 换 IP 无效，解释得更具体
+        from .cdn import cdn_note
+        cdn = next((cdn_note(p.ip) for p in blocked if cdn_note(p.ip)), "")
+        if cdn:
+            advice += cdn + "。"
+        advice += "这类阻断需要代理 / 加密隧道才能绕过。"
         return Verdict(
             layer=Layer.TLS_BLOCKED,
             headline="TCP 能连通，但 TLS 握手被切断",
-            evidence=("对 %d 个 IP 的 443 端口 TCP 连接均成功，但 TLS 握手阶段被中断（%s）。"
-                      "阻断发生在 SNI 层：客户端发出明文域名后才被切断。"
-                      % (len(blocked), detail or "RST 或无响应")),
-            hosts_advice=("添加 hosts 无效。hosts 只影响 DNS 解析，够不到 SNI 这一层。"
-                          "这类阻断需要代理 / 加密隧道才能绕过。"),
+            evidence=evidence,
+            hosts_advice=advice,
         )
 
     # ---- 7. 全部 TCP 不通
@@ -349,19 +384,30 @@ def _hosts_advice_for_success(best: ProbeResult, dns_ips: list[str],
 
 # ---------------------------------------------------------------- 优化建议
 
-def build_tips(report: Report, best: Optional[ProbeResult]) -> list[str]:
-    """可连接时给出的优化建议。只讲有证据的事。"""
-    tips: list[str] = []
+def build_tips(report: Report, best: Optional[ProbeResult],
+               layer: Optional[Layer] = None) -> list[str]:
+    """给报告的补充信息。分两类：
 
-    ok_dns = [e for e in report.dns if e.ok]
-    if ok_dns:
-        ranked = sorted(ok_dns, key=lambda e: e.ms)
-        fastest, slowest = ranked[0], ranked[-1]
-        tips.append("DNS 延迟：最快 %s（%s）%.0f ms，最慢 %s %.0f ms"
-                    % (fastest.name, fastest.server, fastest.ms,
-                       slowest.name, slowest.ms))
-        if fastest.ms < 20 and slowest.ms > 80:
-            tips.append("不同 DNS 延迟差距较大，改用最快的那家可缩短首屏等待")
+    - 诊断类（任何层都显示）：解析一致性、代理、IPv6 出口、CDN 归属
+    - 优化类（只在链路可用时显示）：DNS 延迟、证书续期、首字节耗时等
+
+    v2.0.3 的问题：失败层也照常输出「DNS 延迟最快…」这类优化建议，
+    与「hosts 无效 / 换 IP 无效」的结论自相矛盾，容易被误读成换个 DNS 就能解决。
+    这里按 layer 把两类分开，失败层只保留对诊断有帮助的信息。
+    """
+    tips: list[str] = []
+    usable = layer is None or layer in (Layer.SUCCESS, Layer.HTTP_REJECT)
+
+    if usable:
+        ok_dns = [e for e in report.dns if e.ok]
+        if ok_dns:
+            ranked = sorted(ok_dns, key=lambda e: e.ms)
+            fastest, slowest = ranked[0], ranked[-1]
+            tips.append("DNS 延迟：最快 %s（%s）%.0f ms，最慢 %s %.0f ms"
+                        % (fastest.name, fastest.server, fastest.ms,
+                           slowest.name, slowest.ms))
+            if fastest.ms < 20 and slowest.ms > 80:
+                tips.append("不同 DNS 延迟差距较大，改用最快的那家可缩短首屏等待")
 
     consistency = dns_consistency(report)
     if consistency["doh_disjoint"]:
@@ -374,7 +420,32 @@ def build_tips(report: Report, best: Optional[ProbeResult]) -> list[str]:
         tips.append("本机检测到代理（%s，来源：%s），直连探测结果与浏览器实际路径可能不同"
                     % (report.proxy.url, report.proxy.source))
 
-    if best is None:
+    # IPv6 环境归因：本机没有 IPv6 出口时，AAAA「不可达」不代表目标站点问题。
+    if report.ipv6_outbound is False:
+        v6 = [p for p in report.probes if p.family == 6]
+        if any(p.tcp is not TcpStatus.OK for p in v6):
+            tips.append("本机没有 IPv6 出口，报告中 AAAA 地址「不可达」是环境限制，"
+                        "不代表目标站点有问题；请只依据 IPv4 结果判断")
+
+    # CDN 归属：Anycast 换 IP 无效，属于诊断信息，失败层也要显示。
+    # 按 CDN 名去重 —— 同一个 CDN 的 4 个 IP 只提示一次，避免刷屏。
+    if not usable:
+        from .cdn import cdn_name, cdn_note
+        seen_cdn: set[str] = set()
+        cdn_ips: dict[str, list[str]] = {}
+        for p in report.probes:
+            name = cdn_name(p.ip)
+            if name:
+                cdn_ips.setdefault(name, []).append(p.ip)
+        for name, ips in cdn_ips.items():
+            first = cdn_note(ips[0])
+            if first and name not in seen_cdn:
+                seen_cdn.add(name)
+                tips.append("%s 等 %d 个地址属于 %s 的 Anycast 段，"
+                            "同段换 IP 通常仍命中同一边缘节点，改 hosts 意义不大"
+                            % ("、".join(ips[:2]), len(ips), name))
+
+    if best is None or not usable:
         return tips
 
     tls = best.tls
@@ -429,10 +500,11 @@ def build_tips(report: Report, best: Optional[ProbeResult]) -> list[str]:
 # ---------------------------------------------------------------- 下一步动作
 
 def build_fix_hint(report: Report, verdict: Verdict) -> str:
-    """把结论翻译成现在该做什么。与 evidence（为什么）严格分开。
+    """纯动作描述 —— 报告与 GUI 共用，绝不含 CLI 命令。
 
-    每条都必须可操作：给出具体命令或明确的"不要做什么"，
-    不写"建议检查网络"这类无法执行的话。
+    GUI 用户无法在界面里输入命令，把 --report / --json 这类参数写进
+    报告只会误导（v2.0.3 的实际反馈）。命令统一放 build_cli_hint()，
+    只在命令行终端输出。
     """
     layer = verdict.layer
     domain = report.domain
@@ -440,32 +512,35 @@ def build_fix_hint(report: Report, verdict: Verdict) -> str:
     if layer is Layer.SUCCESS:
         if verdict.hosts_write_needed and verdict.hosts_entry_ips:
             ip = verdict.hosts_entry_ips[0]
-            return ("要固定这条可用链路：sitecheck %s --ip %s --apply-hosts"
-                    "（会先备份再写入，可用 sitecheck hosts --restore 回滚）"
-                    % (domain, ip))
-        return "无需改动配置；可用 --report / --json 导出本次报告留档。"
+            return ("要固定这条可用链路，把 %s 写入 hosts（工具会先备份再写入，可回滚）。"
+                    % ip)
+        return "无需改动配置；可导出本次报告留档。"
 
     if layer is Layer.HTTP_REJECT:
         return ("用浏览器直接打开 %s 复测：若浏览器正常，说明只是工具发的是极简请求头，"
                 "被反爬 / WAF 拦了，无需处理。" % domain)
 
     if layer is Layer.PROXY_REQUIRED:
-        return ("保持浏览器走代理即可，不要改 hosts。"
-                "若要让命令行工具也通：设置 HTTPS_PROXY=%s 后重试。" % report.proxy.url)
+        return ("保持浏览器走代理即可，不要改 hosts；"
+                "命令行工具需要单独设置代理后再重试。")
 
     if layer is Layer.HTTP_NO_RESPONSE:
+        if report.hosts:
+            return ("先清理本机 hosts 里 %s 的 %d 条条目再复测："
+                    "失效条目会覆盖 DNS 的正常解析，比新增条目更值得先处理。"
+                    % (domain, len(report.hosts)))
         return ("用浏览器复测 %s；若浏览器也不通，"
                 "临时关闭安全软件 / 防火墙后再测一次。DNS 和证书都已正确，改 hosts 无效。"
                 % domain)
 
     if layer is Layer.INCONCLUSIVE:
         if report.incomplete:
-            return "重跑时加大时限：sitecheck %s --deadline 90" % domain
-        return "先确认能打开任意网站，再重跑 sitecheck %s。" % domain
+            return "本次检测被中断，请在更宽松的时限下重新检测。"
+        return "先确认能打开任意网站，再重新检测。"
 
     if layer is Layer.DNS_POISONED:
-        return ("从官方渠道拿到真实 IP 后先验证：sitecheck %s --ip <IP>。"
-                "只有报告确认「真实 IP / 证书匹配」才考虑写入 hosts。" % domain)
+        return ("从官方渠道拿到真实 IP 后先验证，"
+                "只有报告确认「证书匹配」才考虑写入 hosts。")
 
     if layer is Layer.TLS_BLOCKED:
         return "hosts 改到这里无效；需要代理或加密隧道，不要在 hosts 上继续尝试。"
@@ -475,10 +550,35 @@ def build_fix_hint(report: Report, verdict: Verdict) -> str:
                 "问题在服务端或端口策略，改 hosts 无效。")
 
     if layer is Layer.DNS_FAIL:
-        return ("先核对域名拼写与有效期；确认无误后换用加密 DNS "
-                "（sitecheck dns-bench 可查看哪家更快且未被污染）。")
+        return ("先核对域名拼写与有效期；确认无误后可对比各家 DNS，"
+                "换用未被污染的加密 DNS 服务。")
 
-    return "用 sitecheck %s --ip <可信 IP> 重试，或在网络正常的环境复测。" % domain
+    return "用可信 IP 重试，或在网络正常的环境复测。"
+
+
+def build_cli_hint(report: Report, verdict: Verdict) -> str:
+    """命令行专用提示：含 sitecheck 命令，只在 CLI 终端输出。"""
+    layer = verdict.layer
+    domain = report.domain
+
+    if layer is Layer.SUCCESS:
+        if verdict.hosts_write_needed and verdict.hosts_entry_ips:
+            ip = verdict.hosts_entry_ips[0]
+            return ("命令行固定链路：sitecheck %s --ip %s --apply-hosts"
+                    "（可用 sitecheck hosts --restore 回滚）" % (domain, ip))
+        return "留档：sitecheck %s --report 报告.md 或 --json 报告.json" % domain
+    if layer is Layer.INCONCLUSIVE and report.incomplete:
+        return "重跑：sitecheck %s --deadline 90" % domain
+    if layer is Layer.DNS_POISONED:
+        return "验证真实 IP：sitecheck %s --ip <IP>" % domain
+    if layer is Layer.DNS_FAIL:
+        return "对比各 DNS：sitecheck dns-bench"
+    if layer is Layer.HTTP_NO_RESPONSE and report.hosts:
+        return "清理 hosts 条目后复测：sitecheck hosts --restore（工具会先备份）"
+    # 已经证实是 SNI / TCP 层阻断时，换 IP 无效，不该再建议 --ip
+    if layer in (Layer.TLS_BLOCKED, Layer.TCP_BLOCKED):
+        return ""
+    return "指定可信 IP 重试：sitecheck %s --ip <IP>" % domain
 
 
 def judge(report: Report) -> Verdict:
@@ -490,4 +590,37 @@ def judge(report: Report) -> Verdict:
     result = _judge_impl(report)
     if not result.fix_hint:
         result.fix_hint = build_fix_hint(report, result)
+    if not result.cli_hint:
+        result.cli_hint = build_cli_hint(report, result)
+
+    # 证据强度：证书匹配 / 明确 RST 是硬证据；仅凭"没测到"是弱证据。
+    # 注意每条文案必须与该层实际拿到的证据一致 —— 过去给 HTTP_NO_RESPONSE
+    # 套用"未做证书级交叉验证"，但这一层的探针已经证书匹配，自相矛盾。
+    if result.layer in (Layer.INCONCLUSIVE, Layer.UNKNOWN):
+        result.confidence = "weak"
+        result.confidence_note = "证据不完整，结论仅供参照，建议复测"
+    elif result.layer in (Layer.SUCCESS, Layer.DNS_POISONED, Layer.HTTP_NO_RESPONSE):
+        result.confidence = "strong"
+        result.confidence_note = "以 TLS 证书匹配为判定依据，目标身份已确认"
+    elif result.layer is Layer.TLS_BLOCKED and report.sni_control:
+        if report.sni_control.proves_domain_block:
+            result.confidence = "strong"
+            result.confidence_note = "SNI 对照实验已证实阻断与目标域名绑定"
+        else:
+            result.confidence = "moderate"
+            result.confidence_note = "对照实验显示阻断针对 IP / 路径，非域名级"
+    else:
+        result.confidence = "moderate"
+        result.confidence_note = "基于 TCP/TLS 分层探测，证据可靠但未做证书级交叉验证"
+
+    # 抖动降级：同一 IP 在不同阶段结论相反时，单次探测的失败不能当稳定故障。
+    # 这不是改判定层（退出码语义不变），只降证据强度并附可核对的反证。
+    if report.flaky_evidence:
+        result.confidence = "weak"
+        result.confidence_note = ("同一 IP 多次探测结论相反，链路在抖动；"
+                                  "本次失败可能是暂时丢包，建议复测确认")
+        result.evidence = (result.evidence
+                           + "　链路抖动反证：" + "；".join(report.flaky_evidence))
+        if result.headline.startswith("TLS 与证书均正常"):
+            result.headline = "证书正常，但 HTTP 响应不稳定（链路抖动）"
     return result

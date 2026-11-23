@@ -45,7 +45,7 @@ class HttpStatus(str, Enum):
     SKIPPED = "skipped"         # 前置条件不满足，未发起请求
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 
 
 class Layer(str, Enum):
@@ -142,7 +142,7 @@ class HttpResult:
 class ProbeResult:
     """单个 IP 的完整探测结果。"""
     ip: str
-    source: str = "候选"             # 手动 / hosts / 解析 / 候选
+    source: str = "候选"             # 手动 / hosts / 解析 / 远端 DoH / 远程源 / 候选
     family: int = 4                  # 4 或 6
     tcp: TcpStatus = TcpStatus.UNREACHABLE
     tcp_ms: float = 0.0
@@ -172,6 +172,56 @@ class ControlResult:
     ip: str
     ok: bool
     detail: str = ""
+
+
+@dataclass
+class SniControl:
+    """SNI 对照实验：同一 IP 换一个无关域名握手，判断阻断是域名级还是 IP 级。
+
+    TLS/SNI 阻断的默认判定只有「TCP 通 + TLS RST」这一条证据，属于推断。
+    对照实验把 SNI 换成与目标无关的正常域名再握手：
+      - 换 SNI 后握手成功 -> 阻断与目标域名绑定，域名级 SNI 阻断（已证实）
+      - 换 SNI 后仍被切断 -> IP / 路径层的 TLS 阻断（与域名无关）
+    """
+    ip: str
+    sni: str                       # 对照用的域名（控制组里能连通的那个）
+    handshake_ok: bool
+    status: TlsStatus
+    detail: str = ""
+
+    @property
+    def proves_domain_block(self) -> bool:
+        return self.handshake_ok
+
+    @property
+    def text(self) -> str:
+        if self.handshake_ok:
+            return ("对同一 IP 换用无关域名「%s」作 SNI 后握手成功，"
+                    "证明阻断与目标域名绑定（域名级 SNI 阻断，已证实）" % self.sni)
+        return ("对同一 IP 换用无关域名「%s」作 SNI 后握手仍失败（%s），"
+                "说明阻断针对该 IP / 路径，与具体域名无关"
+                % (self.sni, self.detail or self.status.value))
+
+
+@dataclass
+class AltDomain:
+    """证书 SAN 里筛出的同站备用域名，以及逐个探测的可用性。
+
+    usable: True 可用 / False 不可用 / None 无法判定（如解析不到、探测超时）。
+    只列证书覆盖且与目标同站的域名；共享证书上的无关品牌域名必须滤掉。
+    """
+    domain: str
+    usable: Optional[bool] = None
+    ip: str = ""
+    detail: str = ""
+
+    @property
+    def status_text(self) -> str:
+        if self.usable is True:
+            return "可用"
+        if self.usable is False:
+            return "不可用"
+        return "无法判定"
 
 
 @dataclass
@@ -220,6 +270,13 @@ class Verdict:
     # 下一步可操作动作，与「依据」「hosts 建议」分开：
     # 依据解释为什么，fix_hint 说明现在该做什么。
     fix_hint: str = ""
+    # 命令行专用提示：含 sitecheck 命令，只在 CLI 终端输出，绝不在报告 / GUI 里显示
+    # （GUI 用户无法输入命令，显示出来只会误导）。
+    cli_hint: str = ""
+    # 证据强度：strong / moderate / weak —— 判定所依据的证据有多硬。
+    # 渲染层据此标注，避免把「推断」当成「已证实」呈现给用户。
+    confidence: str = "moderate"
+    confidence_note: str = ""
 
 
 @dataclass
@@ -232,6 +289,14 @@ class Report:
     doh: list[DnsResult] = field(default_factory=list)
     hosts: list[tuple[int, str]] = field(default_factory=list)   # [(行号, IP)]
     control: list[ControlResult] = field(default_factory=list)
+    # 控制组是否测过 IPv6：None 未测 / True 本机有 IPv6 出口 / False 无出口。
+    # 用于给「AAAA 不可达」归因，避免把本机环境限制误报成目标站点问题。
+    ipv6_outbound: Optional[bool] = None
+    sni_control: Optional[SniControl] = None   # TLS/SNI 阻断的对照实验结果
+    alt_domains: list[AltDomain] = field(default_factory=list)  # 证书 SAN 同站备用域名
+    # 抖动证据：同一 IP 在不同阶段得出相反结论时记录，用于把结论降级为
+    # 「链路不稳定」，避免把间歇性丢包当成稳定的应用层阻断。
+    flaky_evidence: list[str] = field(default_factory=list)
     probes: list[ProbeResult] = field(default_factory=list)
     proxy: ProxyInfo = field(default_factory=ProxyInfo)
     sys_ips: list[str] = field(default_factory=list)

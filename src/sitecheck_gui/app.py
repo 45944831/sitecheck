@@ -525,7 +525,8 @@ class MainWindow(QWidget):
         self.b_hosts.setEnabled(bool(verdict and verdict.hosts_write_needed))
         self.b_export.setEnabled(True)
 
-        self.result_view.setHtml(rendermod.render_html(report))
+        # 界面显示精简版（段落全留、文案压短）；导出报告仍用完整版
+        self.result_view.setHtml(rendermod.render_html(report, compact=True))
         self.result_view.verticalScrollBar().setValue(0)
         self.log.appendPlainText("")
         if report.incomplete:

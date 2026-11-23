@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from sitecheck import dns as dnsmod
-from sitecheck import orchestrator
+from sitecheck import orchestrator, render
 
 from .conftest import report as make_report
 
@@ -87,3 +87,45 @@ def test_remote_ip_does_not_override_manual(monkeypatch):
     candidates = orchestrator.collect_candidates(result, ["1.1.1.1"])
     assert candidates[0] == ("1.1.1.1", "手动")
     assert ("9.9.9.9", "远程源") in candidates
+
+
+def test_doh_ips_marked_as_remote_source(monkeypatch):
+    """本机 UDP 与远端 DoH 必须标成不同来源，不能都叫「解析」。"""
+    from sitecheck.models import DnsResult, DnsStatus
+
+    monkeypatch.setattr(dnsmod, "fetch_remote_ips", lambda _domain: [])
+    monkeypatch.setattr(dnsmod, "system_resolve", lambda _host: [])
+    udp = DnsResult(server="223.5.5.5", name="阿里", status=DnsStatus.OK,
+                    ips=["1.1.1.1"], transport="udp")
+    doh = DnsResult(server="https://doh.pub/dns-query", name="DoH 腾讯",
+                    status=DnsStatus.OK, ips=["9.9.9.9"], transport="doh")
+    result = make_report(dns=[udp], doh=[doh], hosts=[])
+    candidates = orchestrator.collect_candidates(result, [])
+    assert ("1.1.1.1", "解析") in candidates
+    assert ("9.9.9.9", "远端 DoH") in candidates
+    assert ("9.9.9.9", "解析") not in candidates
+
+
+def test_reports_show_remote_dns_as_separate_section():
+    """Markdown / HTML / JSON 都要把远端 DoH 与本机解析分开呈现。"""
+    from sitecheck.models import DnsResult, DnsStatus
+
+    udp = DnsResult(server="223.5.5.5", name="阿里", status=DnsStatus.OK,
+                    ips=["1.1.1.1"], transport="udp")
+    doh = DnsResult(server="https://doh.pub/dns-query", name="DoH 腾讯",
+                    status=DnsStatus.OK, ips=["9.9.9.9"], transport="doh")
+    report = make_report(dns=[udp], doh=[doh], hosts=[])
+
+    md = render.render_markdown(report)
+    assert "本机解析（UDP" in md
+    assert "远端解析（DoH" in md
+    assert "仍须通过证书校验才算真实 IP" in md
+
+    html = render.render_html(report)
+    assert "DNS 解析 · 本机" in html
+    assert "DNS 解析 · 远端" in html
+
+    import json
+    payload = json.loads(render.render_json(report))
+    assert payload["doh"][0]["transport"] == "doh"
+    assert payload["dns"][0]["transport"] == "udp"

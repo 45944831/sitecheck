@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 
+from . import altdomains as altmod
 from . import dns as dnsmod
 from . import hosts as hostsmod
 from . import probe as probemod
@@ -27,7 +28,9 @@ from .models import (
     ProbeResult,
     ProxyInfo,
     Report,
+    SniControl,
     TcpStatus,
+    TlsStatus,
 )
 
 DEFAULT_TIMEOUT = 8.0
@@ -207,7 +210,72 @@ def _check_control(domain: str, timeout: float, progress: ProgressFn,
     return results
 
 
+def _check_ipv6_outbound(timeout: float, v6_candidates: list[str] | None = None) -> Optional[bool]:
+    """探测本机是否有 IPv6 出口。
+
+    用已知可达的公共 IPv6 地址（控制站点 / 解析出的 AAAA）做 TCP 探测：
+    能建连说明本机 IPv6 可用。注意不能用目标域名自己的 AAAA —— 那是待判定对象，
+    "它不通"不能证明本机没有 IPv6 出口。
+    返回 None 表示没有可用的 IPv6 对照地址（无法判定）。
+    """
+    targets = list(v6_candidates or [])
+    # 兜底：一批稳定的公共 IPv6（DNS over HTTPS 服务商），与被测目标无关
+    targets += ["2606:4700:4700::1111", "2001:4860:4860::8888"]
+    for addr in targets:
+        if ":" not in addr:
+            continue
+        try:
+            status, _ms = probemod.tcp_probe(addr, 443,
+                                             min(timeout, probemod.TCP_TIMEOUT_CAP))
+            if status is TcpStatus.OK:
+                return True
+        except Exception:                              # noqa: BLE001
+            continue
+    return False if targets else None
+
+
+def _sni_control(report: Report, budget: float) -> Optional[SniControl]:
+    """SNI 对照实验：对被 SNI 阻断的 IP 换无关域名再握手。
+
+    取控制组里已确认能直连通的域名作 SNI —— 它在同一 IP 上若能完成握手，
+    说明该 IP 的 TLS 通道本身可用，阻断只针对目标域名（域名级）。
+    最多试 1 个 IP、1 个域名，避免拖慢检测。
+    """
+    blocked = [p for p in report.probes
+               if p.tcp is TcpStatus.OK and p.tls
+               and p.tls.status is TlsStatus.BLOCKED]
+    if not blocked:
+        return None
+    sni = next((c.host for c in report.control if c.ok and c.detail != "经代理"), "")
+    if not sni:
+        return None
+    target = sorted(blocked, key=lambda p: p.tcp_ms)[0]
+    try:
+        tls = probemod.tls_probe(target.ip, sni, 443,
+                                 min(budget, probemod.TLS_TIMEOUT_CAP))
+        return SniControl(
+            ip=target.ip, sni=sni,
+            handshake_ok=tls.handshake_ok,
+            status=tls.status,
+            detail=(tls.detail or tls.status.value) if not tls.handshake_ok else "",
+        )
+    except Exception as exc:                           # noqa: BLE001
+        return SniControl(ip=target.ip, sni=sni, handshake_ok=False,
+                          status=TlsStatus.ERROR, detail=str(exc)[:60])
+
+
 # ---------------------------------------------------------------- 候选 IP
+
+def _all_resolved_ips(report: Report) -> list[str]:
+    """DNS/DoH 解析出的全部 IP（去重），用于判断是否需要做 IPv6 出口探测。"""
+    out: list[str] = []
+    for entry in report.dns + report.doh:
+        if entry.ok:
+            for ip in entry.all_ips:
+                if ip not in out:
+                    out.append(ip)
+    return out
+
 
 def collect_candidates(report: Report, extra_ips: list[str]) -> list[tuple[str, str]]:
     """汇总候选 IP 并标注来源。返回 [(ip, 来源)]。
@@ -223,13 +291,24 @@ def collect_candidates(report: Report, extra_ips: list[str]) -> list[tuple[str, 
         except ValueError:
             continue
 
+    # 本机 UDP 解析与远端加密解析分开标记：两者可能给出不同 IP
+    # （UDP 被污染、DoH 未被污染时尤其明显），合并成一个「解析」来源
+    # 会让报告看不出哪个 IP 是远端给的。探测优先级不变，仍按插入顺序。
     from_dns: list[str] = []
-    for entry in report.dns + report.doh:
+    for entry in report.dns:
         if not entry.ok:
             continue
         for ip in entry.all_ips:
             if ip not in from_dns:
                 from_dns.append(ip)
+
+    from_remote: list[str] = []
+    for entry in report.doh:
+        if not entry.ok:
+            continue
+        for ip in entry.all_ips:
+            if ip not in from_remote:
+                from_remote.append(ip)
 
     from_hosts = report.hosts_ips
 
@@ -248,6 +327,8 @@ def collect_candidates(report: Report, extra_ips: list[str]) -> list[tuple[str, 
         add(ip, "hosts")
     for ip in from_dns:
         add(ip, "解析")
+    for ip in from_remote:
+        add(ip, "远端 DoH")
 
     # 远程 hosts 情报源：DNS 污染时本地解析结果全是假的，这是唯一
     # 不依赖本机解析路径的补充渠道。它只是候选，仍须通过证书校验。
@@ -375,7 +456,8 @@ def _proxy_crosscheck(domain: str, probes: list[ProbeResult],
     if silent:
         targets = sorted(silent, key=lambda p: p.tcp_ms)[:1]
     elif not any(p.genuine for p in probes):
-        priority = {"手动": 0, "hosts": 1, "解析": 2, "远程源": 3, "候选": 4}
+        priority = {"手动": 0, "hosts": 1, "解析": 2, "远端 DoH": 3,
+                    "远程源": 4, "候选": 5}
         targets = sorted(probes, key=lambda p: (priority.get(p.source, 9),
                                                 p.tcp_ms))[:2]
     else:
@@ -437,6 +519,22 @@ def analyze(domain: str, extra_ips: Optional[list[str]] = None,
         if budget > 0.1:
             report.control = _check_control(domain, budget, progress,
                                             "出网校验", report.proxy)
+            # IPv6 出口归因：只在候选里确实出现 AAAA 记录时才测，省一次网络往返
+            resolved = _all_resolved_ips(report)
+            if any(":" in ip for ip in resolved):
+                v6budget = _remaining(deadline, 2.5)
+                if v6budget > 0.3:
+                    # 用控制站点解析出的 AAAA 作对照，不用目标域名自己的地址
+                    v6_refs: list[str] = []
+                    for host, _label in CONTROLS:
+                        try:
+                            ans = dnsmod.query_server("223.5.5.5", "阿里", host, v6budget)
+                            v6_refs.extend(ans.ipv6)
+                            if v6_refs:
+                                break
+                        except Exception:               # noqa: BLE001
+                            continue
+                    report.ipv6_outbound = _check_ipv6_outbound(v6budget, v6_refs)
         else:
             aborted = _stop_reason(deadline, should_stop) or "整体超时"
 
@@ -468,11 +566,106 @@ def analyze(domain: str, extra_ips: Optional[list[str]] = None,
     # 真实 IP：证书匹配才算
     report.real_ips = [p.ip for p in report.probes if p.genuine]
 
+    # SNI 对照实验：TCP 通但 TLS 被切断时，换一个无关域名握手，
+    # 判断阻断是域名级（已证实）还是 IP / 路径级。只在未中断且还有预算时做。
+    if not aborted and any(p.tcp is TcpStatus.OK and p.tls
+                           and p.tls.status is TlsStatus.BLOCKED
+                           for p in report.probes):
+        budget = _remaining(deadline, 2.0)
+        if budget > 0.3:
+            report.sni_control = _sni_control(report, budget)
+
+    # 证书备用域名：只在握手成功、拿到 SAN、且还有预算时做。
+    # SNI 被切断的站点拿不到证书，alt_domains 自然为空 —— 不猜备用地址。
+    if not aborted and report.real_ips:
+        primary = _primary(report)
+        if primary and primary.tls and primary.tls.handshake_ok and primary.tls.san:
+            budget = _remaining(deadline, 6.0)
+            if budget > 0.5:
+                report.alt_domains = altmod.probe_alt_domains(
+                    domain, primary.tls.san, budget, progress)
+
+    # 抖动检测：同一 IP 在不同探测阶段得出相反结论时，不能把单次失败
+    # 当成稳定的阻断。用主探测与备用域名探测的已有结果交叉比对，零额外请求。
+    report.flaky_evidence = _detect_flakiness(report)
+
     # 判定
     report.verdict = verdictmod.judge(report)
-    if not report.tips:
-        report.tips = verdictmod.build_tips(report, _primary(report))
+    if not report.tips and report.verdict:
+        report.tips = verdictmod.build_tips(report, _primary(report),
+                                            report.verdict.layer)
     return report
+
+
+def _detect_flakiness(report: Report) -> list[str]:
+    """找出「同一 IP 在不同阶段结论相反」的证据。
+
+    这是链路抖动的硬证据：单看主探测，TLS 成功、HTTP 超时像是稳定的
+    应用层阻断；但同一 IP 在备用域名探测里 TLS 也超时，就说明链路本身
+    在间歇性丢包，不能把「这次没测到」当成「稳定不通」。
+
+    只比对已有结果，不发额外请求。条件严格：必须同一 IP、且两次的
+    TLS 结论相反，避免把不同 IP 的正常差异误报成抖动。
+    """
+    evidence: list[str] = []
+    main_by_ip: dict[str, ProbeResult] = {}
+    for probe_result in report.probes:
+        if probe_result.tls and probe_result.tls.handshake_ok:
+            main_by_ip[probe_result.ip] = probe_result
+
+    for alt in report.alt_domains:
+        # 只对「主探测握手成功 + 备用探测明确 TLS 失败」的情况报警。
+        # 无法判定（解析不到/超时未得出）不算反证。
+        if alt.usable is not False or not alt.ip:
+            continue
+        if "TLS" not in alt.detail:
+            continue
+        main = main_by_ip.get(alt.ip)
+        if not main or main.ip != alt.ip:
+            continue
+        evidence.append(
+            "同一 IP %s：主探测 TLS 握手成功、证书匹配 %s，"
+            "但对备用域名 %s 探测时 TLS 失败（%s）"
+            % (main.ip, report.domain, alt.domain, alt.detail))
+
+    # HTTP 阶段会重新建 TCP + TLS（http_probe 不复用主探测的连接）。同一个 IP
+    # 主探测握手成功、HTTP 阶段重新握手却失败，是链路间歇性丢包的铁证。
+    # 这种情况备用域名可能全部可用，上面只比对 alt_domains 的逻辑会漏掉。
+    # 仍只读已有结果，零额外网络请求。
+    for probe_result in report.probes:
+        if not (probe_result.tls and probe_result.tls.handshake_ok):
+            continue
+        http_result = probe_result.http
+        if not http_result or http_result.usable:
+            continue
+        detail = http_result.detail or ""
+        if not _is_reconnect_failure(detail):
+            continue
+        evidence.append(
+            "同一 IP %s：主探测 TLS 握手成功、证书匹配 %s，"
+            "但 HTTP 阶段重新建连时失败（%s）"
+            % (probe_result.ip, report.domain, detail))
+    return evidence
+
+
+def _is_reconnect_failure(detail: str) -> bool:
+    """http.detail 是否属于「重建连接/重新握手」阶段的失败。
+
+    HTTP 探针重新建 TCP + TLS。只有那些主探测已经通过、重建时又失败的阶段
+    才算抖动证据（TCP 重连失败、TLS 重新握手失败）。
+
+    「等待响应超时」「未收到任何字节」等是 TLS 成功之后的 HTTP 层现象，
+    与主探测的 TLS 结论不冲突，不算反证。
+    """
+    for marker in ("连接失败", "TLS 建立失败", "TLS 握手失败"):
+        if marker in detail:
+            return True
+    low = detail.lower()
+    if "tls" in low:
+        for kw in ("timed out", "timeout", "reset", "失败"):
+            if kw in low or kw in detail:
+                return True
+    return False
 
 
 def _primary(report: Report) -> Optional[ProbeResult]:
